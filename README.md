@@ -9,14 +9,13 @@ Ships with an interactive TUI (default) and a classic CLI mode.
 ```sh
 curl -fsSL https://llmfit.axjns.dev/install.sh | sh
 ```
+_Downloads the latest release binary from GitHub and installs it to `/usr/local/bin` (or `~/.local/bin`)_
+
 Or
 ```sh
 brew tap AlexsJones/llmfit
 brew install llmfit
 ```
-
-Downloads the latest release binary from GitHub and installs it to `/usr/local/bin` (or `~/.local/bin`).
-
 
 ![demo](demo.gif)
 
