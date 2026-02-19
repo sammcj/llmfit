@@ -46,10 +46,13 @@ fetch_latest_tag() {
     need curl
     need tar
 
-    TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep '"tag_name"' \
+    # Use the releases redirect instead of the API to avoid GitHub's
+    # 60-request/hour rate limit on unauthenticated API calls (403).
+    TAG="$(curl -fsSI "https://github.com/${REPO}/releases/latest" 2>/dev/null \
+        | grep -i '^location:' \
         | head -1 \
-        | sed 's/.*"tag_name": *"//;s/".*//')"
+        | sed 's|.*/tag/||' \
+        | tr -d '\r\n')"
 
     [ -n "$TAG" ] || err "Could not determine latest release. Check https://github.com/${REPO}/releases"
 }
