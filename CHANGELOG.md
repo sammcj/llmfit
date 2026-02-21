@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.6](https://github.com/AlexsJones/llmfit/compare/llmfit-v0.3.5...llmfit-v0.3.6) (2026-02-21)
+
+
+### Features
+
+* release plumbing ([7d21719](https://github.com/AlexsJones/llmfit/commit/7d217192bc1638f7ff69a22c2467d7d86da96641))
+* release plumbing ([3accbb4](https://github.com/AlexsJones/llmfit/commit/3accbb42c99321fb6f8ade9d2f07af0fee93ed9e))
+
 ## [0.3.5](https://github.com/AlexsJones/llmfit/compare/llmfit-v0.3.4...llmfit-v0.3.5) (2026-02-21)
 
 
