@@ -1027,6 +1027,20 @@ fn estimate_vram_from_name(name: &str) -> f64 {
     if lower.contains("5500") {
         return 4.0;
     }
+    // Integrated GPUs (APU iGPUs) — must check before generic fallbacks
+    // APU names like "AMD Radeon(TM) Graphics" or "Radeon Graphics" without
+    // a discrete model number (RX/HD/R5/R7/R9) have very limited dedicated VRAM.
+    if (lower.contains("radeon") || lower.contains("amd"))
+        && !lower.contains("rx ")
+        && !lower.contains("hd ")
+        && !lower.contains(" r5 ")
+        && !lower.contains(" r7 ")
+        && !lower.contains(" r9 ")
+        && (lower.contains("graphics") || lower.contains("igpu"))
+    {
+        return 0.5;
+    }
+
     // Generic fallbacks
     if lower.contains("rtx") {
         return 8.0;
