@@ -319,8 +319,8 @@ impl ModelProvider for MlxProvider {
                 percent: None,
             });
 
-            // Try huggingface-cli first
-            let result = std::process::Command::new("huggingface-cli")
+            // Download from Hugging Face using their CLI tool
+            let result = std::process::Command::new("hf")
                 .args(["download", &format!("mlx-community/{}", tag)])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -332,7 +332,8 @@ impl ModelProvider for MlxProvider {
                 }
                 _ => {
                     let _ = tx.send(PullEvent::Error(
-                        "huggingface-cli not found. Install it with: uv tool install 'huggingface_hub[cli]'".to_string(),
+                        "hf not found. Install it with: uv tool install 'huggingface_hub[cli]'"
+                            .to_string(),
                     ));
                 }
             }
