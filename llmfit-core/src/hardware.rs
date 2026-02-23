@@ -1147,12 +1147,18 @@ fn estimate_vram_from_name(name: &str) -> f64 {
     if lower.contains("t4") {
         return 16.0;
     }
-    // AMD RX 9000 series
+    // AMD RX 9000 series (RDNA 4)
     if lower.contains("9070 xt") {
         return 16.0;
     }
     if lower.contains("9070") {
         return 12.0;
+    }
+    if lower.contains("9060 xt") {
+        return 16.0;
+    }
+    if lower.contains("9060") {
+        return 8.0;
     }
     // AMD RX 7000 series
     if lower.contains("7900 xtx") {
