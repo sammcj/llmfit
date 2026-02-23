@@ -179,20 +179,28 @@ impl App {
 
     pub fn apply_filters(&mut self) {
         let query = self.search_query.to_lowercase();
+        // Split query into space-separated terms for fuzzy matching
+        let terms: Vec<&str> = query.split_whitespace().collect();
 
         self.filtered_fits = self
             .all_fits
             .iter()
             .enumerate()
             .filter(|(_, fit)| {
-                // Search filter
-                let matches_search = if query.is_empty() {
+                // Search filter: all terms must match (fuzzy/AND logic)
+                let matches_search = if terms.is_empty() {
                     true
                 } else {
-                    fit.model.name.to_lowercase().contains(&query)
-                        || fit.model.provider.to_lowercase().contains(&query)
-                        || fit.model.parameter_count.to_lowercase().contains(&query)
-                        || fit.model.use_case.to_lowercase().contains(&query)
+                    // Combine all searchable fields into one string
+                    let searchable = format!(
+                        "{} {} {} {}",
+                        fit.model.name.to_lowercase(),
+                        fit.model.provider.to_lowercase(),
+                        fit.model.parameter_count.to_lowercase(),
+                        fit.model.use_case.to_lowercase()
+                    );
+                    // All terms must be present (AND logic)
+                    terms.iter().all(|term| searchable.contains(term))
                 };
 
                 // Provider filter
