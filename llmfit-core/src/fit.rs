@@ -127,7 +127,8 @@ impl ModelFit {
         // Step 2: score memory fit purely on headroom in that path's memory pool
         let (run_mode, mem_required, mem_available) = if system.has_gpu {
             if system.unified_memory {
-                // Apple Silicon: GPU and CPU share the same memory pool.
+                // Unified memory (Apple Silicon or NVIDIA Tegra/Grace Blackwell):
+                // GPU and CPU share the same memory pool.
                 // No CpuOffload -- there's no separate pool to spill to.
                 if let Some(pool) = system.gpu_vram_gb {
                     notes.push("Unified memory: GPU and CPU share the same pool".to_string());

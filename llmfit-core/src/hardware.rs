@@ -237,7 +237,19 @@ impl SystemSpecs {
 
     /// Detect NVIDIA GPUs via nvidia-smi. Returns one GpuInfo per unique model,
     /// with count and per-card VRAM for same-model multi-GPU setups.
+    ///
+    /// First tries querying `addressing_mode` to detect unified memory (Tegra/Grace
+    /// Blackwell platforms). Falls back to the standard 2-column query if the field
+    /// is unavailable on older nvidia-smi versions.
     fn detect_nvidia_gpus() -> Vec<GpuInfo> {
+        // Try the extended query first (addressing_mode,memory.total,name).
+        // On NVIDIA Tegra / Grace Blackwell, addressing_mode returns "ATS"
+        // (Address Translation Services) which signals unified CPU+GPU memory.
+        if let Some(gpus) = Self::try_nvidia_smi_with_addressing_mode() {
+            return gpus;
+        }
+
+        // Fallback: standard 2-column query for older nvidia-smi versions
         let output = match std::process::Command::new("nvidia-smi")
             .arg("--query-gpu=memory.total,name")
             .arg("--format=csv,noheader,nounits")
@@ -253,6 +265,94 @@ impl SystemSpecs {
         };
 
         Self::parse_nvidia_smi_list(&text)
+    }
+
+    /// Try nvidia-smi with `addressing_mode` column. Returns `None` if the
+    /// query fails (e.g. older driver that doesn't support the field), so the
+    /// caller can fall back to the standard query.
+    fn try_nvidia_smi_with_addressing_mode() -> Option<Vec<GpuInfo>> {
+        let output = std::process::Command::new("nvidia-smi")
+            .arg("--query-gpu=addressing_mode,memory.total,name")
+            .arg("--format=csv,noheader,nounits")
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let text = String::from_utf8(output.stdout).ok()?;
+        Some(Self::parse_nvidia_smi_extended(&text))
+    }
+
+    /// Parse `nvidia-smi --query-gpu=addressing_mode,memory.total,name`.
+    /// Detects unified memory when addressing_mode is "ATS" and VRAM is
+    /// unavailable — common on NVIDIA Tegra / Grace Blackwell (DGX Spark).
+    /// Falls back to system RAM via /proc/meminfo as the unified memory pool.
+    fn parse_nvidia_smi_extended(text: &str) -> Vec<GpuInfo> {
+        // Track per-model: (count, per_card_vram_mb, is_unified)
+        let mut grouped: BTreeMap<String, (u32, f64, bool)> = BTreeMap::new();
+        let total_ram_gb = read_proc_meminfo_total_gb();
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(3, ',').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+
+            let addr_mode = parts[0].trim();
+            let is_unified = addr_mode.eq_ignore_ascii_case("ATS");
+
+            let name = parts[2].trim().to_string();
+            let name = if name.is_empty() {
+                "NVIDIA GPU".to_string()
+            } else {
+                name
+            };
+
+            let parsed_vram_mb = parts[1].trim().parse::<f64>().unwrap_or(0.0);
+
+            let vram_mb = if parsed_vram_mb > 0.0 {
+                parsed_vram_mb
+            } else if is_unified {
+                // Unified memory: use total system RAM as the shared pool
+                total_ram_gb.unwrap_or(0.0) * 1024.0
+            } else {
+                estimate_vram_from_name(&name) * 1024.0
+            };
+
+            let entry = grouped.entry(name).or_insert((0, 0.0, false));
+            entry.0 += 1;
+            if vram_mb > entry.1 {
+                entry.1 = vram_mb;
+            }
+            if is_unified {
+                entry.2 = true;
+            }
+        }
+
+        if grouped.is_empty() {
+            return Vec::new();
+        }
+
+        grouped
+            .into_iter()
+            .map(|(name, (count, per_card_vram_mb, is_unified))| GpuInfo {
+                name,
+                vram_gb: if per_card_vram_mb > 0.0 {
+                    Some(per_card_vram_mb / 1024.0)
+                } else {
+                    None
+                },
+                backend: GpuBackend::Cuda,
+                count,
+                unified_memory: is_unified,
+            })
+            .collect()
     }
 
     /// Parse `nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits`.
@@ -1143,6 +1243,20 @@ fn is_amd_unified_memory_apu(cpu_name: &str) -> bool {
     false
 }
 
+/// Read total system RAM from /proc/meminfo (Linux only).
+/// Used as the unified memory pool on NVIDIA Tegra / Grace Blackwell platforms
+/// where nvidia-smi cannot report dedicated VRAM.
+fn read_proc_meminfo_total_gb() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb as f64 / (1024.0 * 1024.0));
+        }
+    }
+    None
+}
+
 /// Fallback VRAM estimation from GPU model name.
 /// Used when nvidia-smi or other tools report 0 VRAM.
 fn estimate_vram_from_name(name: &str) -> f64 {
@@ -1397,5 +1511,47 @@ mod tests {
     fn test_estimate_vram_gb10() {
         assert_eq!(super::estimate_vram_from_name("NVIDIA GB10"), 128.0);
         assert_eq!(super::estimate_vram_from_name("NVIDIA GB20"), 128.0);
+    }
+
+    #[test]
+    fn test_parse_extended_discrete_gpu_not_unified() {
+        // Discrete GPU: addressing_mode is "None", VRAM is reported normally
+        let text = "None, 24564, NVIDIA GeForce RTX 4090\n";
+        let gpus = SystemSpecs::parse_nvidia_smi_extended(text);
+
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "NVIDIA GeForce RTX 4090");
+        assert!(
+            !gpus[0].unified_memory,
+            "discrete GPU should not be unified"
+        );
+        let vram = gpus[0].vram_gb.expect("VRAM should be present");
+        assert!(vram > 23.0 && vram < 25.0, "unexpected VRAM: {vram}");
+    }
+
+    #[test]
+    fn test_parse_extended_tegra_unified_memory() {
+        // NVIDIA Tegra / Grace Blackwell: ATS addressing, VRAM is [N/A]
+        // On a real system, /proc/meminfo would provide the fallback.
+        // In tests, /proc/meminfo may or may not exist.
+        let text = "ATS, [N/A], NVIDIA Thor\n";
+        let gpus = SystemSpecs::parse_nvidia_smi_extended(text);
+
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "NVIDIA Thor");
+        assert!(gpus[0].unified_memory, "ATS should set unified_memory=true");
+        // VRAM comes from /proc/meminfo; if unavailable, it's None
+        // (on Linux test machines it will be Some, on macOS CI it will be None)
+    }
+
+    #[test]
+    fn test_parse_extended_multi_gpu_discrete() {
+        // Two discrete GPUs, no unified memory
+        let text = "None, 24564, NVIDIA GeForce RTX 4090\nNone, 24564, NVIDIA GeForce RTX 4090\n";
+        let gpus = SystemSpecs::parse_nvidia_smi_extended(text);
+
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].count, 2);
+        assert!(!gpus[0].unified_memory);
     }
 }
