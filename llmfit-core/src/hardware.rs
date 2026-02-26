@@ -80,7 +80,7 @@ impl SystemSpecs {
             .map(|cpu| cpu.brand().to_string())
             .unwrap_or_else(|| "Unknown CPU".to_string());
 
-        let gpus = Self::detect_all_gpus(available_ram_gb, &cpu_name);
+        let gpus = Self::detect_all_gpus(total_ram_gb, &cpu_name);
 
         // Primary GPU = the one with the most VRAM (best for inference).
         // For fit scoring, we use the primary GPU's VRAM pool.
@@ -120,7 +120,7 @@ impl SystemSpecs {
     /// Detect all GPUs across all vendors. Returns a Vec sorted by VRAM descending
     /// (best GPU first). Unlike the old cascade, this does NOT short-circuit:
     /// a system with both NVIDIA and AMD GPUs will report both.
-    fn detect_all_gpus(available_ram_gb: f64, cpu_name: &str) -> Vec<GpuInfo> {
+    fn detect_all_gpus(total_ram_gb: f64, cpu_name: &str) -> Vec<GpuInfo> {
         let mut gpus = Vec::new();
 
         // NVIDIA GPUs via nvidia-smi, with sysfs fallback for Linux/toolbox setups
@@ -153,6 +153,30 @@ impl SystemSpecs {
             }
         }
 
+        // AMD unified memory APUs (e.g. Ryzen AI MAX series).
+        // These share the full system RAM between CPU and GPU, like Apple Silicon.
+        // WMI AdapterRAM is a 32-bit field capped at ~4 GB, so we override with
+        // total system RAM for these APUs.
+        if is_amd_unified_memory_apu(cpu_name) {
+            let amd_idx = gpus.iter().position(|g| {
+                let lower = g.name.to_lowercase();
+                lower.contains("amd") || lower.contains("radeon")
+            });
+            if let Some(idx) = amd_idx {
+                gpus[idx].unified_memory = true;
+                gpus[idx].vram_gb = Some(total_ram_gb);
+            } else {
+                // No AMD GPU found via other methods; create one.
+                gpus.push(GpuInfo {
+                    name: format!("{} (integrated)", cpu_name),
+                    vram_gb: Some(total_ram_gb),
+                    backend: GpuBackend::Vulkan,
+                    count: 1,
+                    unified_memory: true,
+                });
+            }
+        }
+
         // Intel Arc via sysfs
         if let Some(vram) = Self::detect_intel_gpu() {
             let already_found = gpus.iter().any(|g| g.name.to_lowercase().contains("intel"));
@@ -168,7 +192,7 @@ impl SystemSpecs {
         }
 
         // Apple Silicon (unified memory)
-        if let Some(vram) = Self::detect_apple_gpu(available_ram_gb) {
+        if let Some(vram) = Self::detect_apple_gpu(total_ram_gb) {
             let name = if cpu_name.to_lowercase().contains("apple") {
                 cpu_name.to_string()
             } else {
@@ -946,6 +970,7 @@ impl SystemSpecs {
             });
             self.has_gpu = true;
             self.gpu_vram_gb = Some(vram_gb);
+            self.total_gpu_vram_gb = Some(vram_gb);
             self.gpu_name = Some("User-specified GPU".to_string());
             self.gpu_count = 1;
             self.backend = backend;
@@ -953,6 +978,9 @@ impl SystemSpecs {
             // Override the primary (first) GPU's VRAM.
             self.gpus[0].vram_gb = Some(vram_gb);
             self.gpu_vram_gb = Some(vram_gb);
+            // Update total VRAM: per-card VRAM * count.
+            let count = self.gpus[0].count;
+            self.total_gpu_vram_gb = Some(vram_gb * count as f64);
             self.has_gpu = true;
         }
         self
@@ -1075,6 +1103,26 @@ fn detect_running_in_wsl() -> bool {
                 .map(|text| text.to_ascii_lowercase().contains("microsoft"))
                 .unwrap_or(false)
         })
+}
+
+/// Check if the CPU name indicates an AMD APU with unified memory architecture.
+/// These APUs share the full system RAM between CPU and GPU (like Apple Silicon).
+/// Currently covers:
+///  - Ryzen AI MAX / MAX+ (Strix Halo): up to 128 GB unified.
+///  - Ryzen AI 9 / 7 / 5 (Strix Point, Krackan Point): configurable shared
+///    memory, users can allocate most of system RAM to GPU via BIOS.
+/// All Ryzen AI APUs have integrated Radeon GPUs that share system memory.
+fn is_amd_unified_memory_apu(cpu_name: &str) -> bool {
+    let lower = cpu_name.to_lowercase();
+    // All "Ryzen AI" branded APUs use unified/shared memory.
+    // Examples:
+    //   "AMD Ryzen AI MAX+ 395 w/ Radeon 8060S"
+    //   "AMD Ryzen AI 9 HX 370 w/ Radeon 890M"
+    //   "AMD Ryzen AI 7 350"
+    if lower.contains("ryzen ai") {
+        return true;
+    }
+    false
 }
 
 /// Fallback VRAM estimation from GPU model name.
@@ -1221,6 +1269,35 @@ fn estimate_vram_from_name(name: &str) -> f64 {
     if lower.contains("5500") {
         return 4.0;
     }
+    // AMD Radeon 8000 series (Ryzen AI MAX / Strix Halo integrated)
+    // These are unified memory APUs; VRAM = system RAM in practice,
+    // but this fallback gives a reasonable discrete estimate for name-only detection.
+    if lower.contains("8060s") {
+        return 32.0;
+    }
+    if lower.contains("8050s") {
+        return 24.0;
+    }
+    if lower.contains("8060") && !lower.contains("8060s") {
+        return 16.0;
+    }
+    if lower.contains("8050") && !lower.contains("8050s") {
+        return 12.0;
+    }
+    // AMD Radeon 800M series (Ryzen AI 9 / Strix Point integrated)
+    if lower.contains("890m") {
+        return 16.0;
+    }
+    if lower.contains("880m") {
+        return 12.0;
+    }
+    if lower.contains("870m") {
+        return 8.0;
+    }
+    if lower.contains("860m") {
+        return 8.0;
+    }
+
     // Integrated GPUs (APU iGPUs) — must check before generic fallbacks
     // APU names like "AMD Radeon(TM) Graphics" or "Radeon Graphics" without
     // a discrete model number (RX/HD/R5/R7/R9) have very limited dedicated VRAM.
@@ -1230,6 +1307,8 @@ fn estimate_vram_from_name(name: &str) -> f64 {
         && !lower.contains(" r5 ")
         && !lower.contains(" r7 ")
         && !lower.contains(" r9 ")
+        && !lower.contains("8060")
+        && !lower.contains("8050")
         && (lower.contains("graphics") || lower.contains("igpu"))
     {
         return 0.5;
