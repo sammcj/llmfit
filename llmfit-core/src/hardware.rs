@@ -900,7 +900,7 @@ impl SystemSpecs {
             .filter_map(|line| line.split(':').last())
             .map(|s| s.trim().to_string())
             .collect();
-        
+
         if ids.is_empty() {
             return Vec::new();
         }
@@ -916,22 +916,23 @@ impl SystemSpecs {
 
             if let Ok(o) = mem_output {
                 let s = String::from_utf8_lossy(&o.stdout);
-                
+
                 // Parse HBM Capacity (e.g., from "HBM Capacity(MB) : 65536")
-                let mem = s.lines()
+                let mem = s
+                    .lines()
                     .find(|l| l.contains("HBM Capacity"))
                     .and_then(|l| l.split(':').last())
                     .and_then(|v| v.trim().split_whitespace().next())
                     .and_then(|num| num.parse::<u64>().ok())
                     .unwrap_or(0);
-                
-                let npu_info = GpuInfo  {
-                                        name: npu_name.to_string(),
-                                        vram_gb: Some((mem as f64) / 1024.0),
-                                        backend: GpuBackend::Ascend,
-                                        count: 1,
-                                        unified_memory: false,
-                                        };
+
+                let npu_info = GpuInfo {
+                    name: npu_name.to_string(),
+                    vram_gb: Some((mem as f64) / 1024.0),
+                    backend: GpuBackend::Ascend,
+                    count: 1,
+                    unified_memory: false,
+                };
                 npu_infos.push(npu_info);
             }
         }
