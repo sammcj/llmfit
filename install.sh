@@ -90,7 +90,7 @@ verify_checksum() {
     CHECKSUM_FILE="${TMPDIR}/${ASSET}.sha256"
 
     # Attempt to download the checksum file (-f exits non-zero on HTTP 4xx/5xx)
-    if ! curl -fsSL "${URL}.sha256" -o "$CHECKSUM_FILE" 2>/dev/null; then
+    if ! curl -fsSL --max-time 10 "${URL}.sha256" -o "$CHECKSUM_FILE" 2>/dev/null; then
         warn "No checksum file found for this release — skipping integrity check"
         return
     fi

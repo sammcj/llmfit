@@ -53,14 +53,20 @@ pub struct OllamaProvider {
 
 impl Default for OllamaProvider {
     fn default() -> Self {
-        let base_url =
-            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let base_url = if base_url.starts_with("http://") || base_url.starts_with("https://") {
-            base_url
-        } else {
-            eprintln!("Warning: OLLAMA_HOST has no http/https scheme, using default");
-            "http://localhost:11434".to_string()
-        };
+        let base_url = std::env::var("OLLAMA_HOST")
+            .ok()
+            .and_then(|url| {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    Some(url)
+                } else {
+                    eprintln!(
+                        "Warning: OLLAMA_HOST must start with http:// or https://, ignoring: {}",
+                        url
+                    );
+                    None
+                }
+            })
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
         Self { base_url }
     }
 }
@@ -215,15 +221,20 @@ pub struct MlxProvider {
 
 impl Default for MlxProvider {
     fn default() -> Self {
-        let server_url =
-            std::env::var("MLX_LM_HOST").unwrap_or_else(|_| "http://localhost:8080".to_string());
-        let server_url = if server_url.starts_with("http://") || server_url.starts_with("https://")
-        {
-            server_url
-        } else {
-            eprintln!("Warning: MLX_LM_HOST has no http/https scheme, using default");
-            "http://localhost:8080".to_string()
-        };
+        let server_url = std::env::var("MLX_LM_HOST")
+            .ok()
+            .and_then(|url| {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    Some(url)
+                } else {
+                    eprintln!(
+                        "Warning: MLX_LM_HOST must start with http:// or https://, ignoring: {}",
+                        url
+                    );
+                    None
+                }
+            })
+            .unwrap_or_else(|| "http://localhost:8080".to_string());
         Self { server_url }
     }
 }
