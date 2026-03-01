@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::theme::ThemeColors;
-use crate::tui_app::{App, DownloadCapability, DownloadProvider, FitFilter, InputMode};
+use crate::tui_app::{App, DownloadCapability, DownloadProvider, FitFilter, InputMode, PlanField};
 use llmfit_core::fit::FitLevel;
 use llmfit_core::fit::SortColumn;
 use llmfit_core::hardware::is_running_in_wsl;
@@ -38,7 +38,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_system_bar(frame, app, outer[0], &tc);
     draw_search_and_filters(frame, app, outer[1], &tc);
 
-    if app.show_detail {
+    if app.show_plan {
+        draw_plan(frame, app, outer[2], &tc);
+    } else if app.show_detail {
         draw_detail(frame, app, outer[2], &tc);
     } else {
         draw_table(frame, app, outer[2], &tc);
@@ -207,9 +209,10 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
     // Search box
     let search_style = match app.input_mode {
         InputMode::Search => Style::default().fg(tc.accent_secondary),
-        InputMode::Normal | InputMode::ProviderPopup | InputMode::DownloadProviderPopup => {
-            Style::default().fg(tc.muted)
-        }
+        InputMode::Normal
+        | InputMode::Plan
+        | InputMode::ProviderPopup
+        | InputMode::DownloadProviderPopup => Style::default().fg(tc.muted),
     };
 
     let search_text = if app.search_query.is_empty() && app.input_mode == InputMode::Normal {
@@ -256,7 +259,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
     let provider_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(tc.border))
-        .title(" Providers (p) ")
+        .title(" Providers (P) ")
         .title_style(Style::default().fg(tc.muted));
 
     let providers = Paragraph::new(Line::from(Span::styled(
@@ -902,6 +905,218 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+
+    if app.input_mode == InputMode::Plan {
+        let (row_offset, label_len) = match app.plan_field {
+            PlanField::Context => (5u16, "  Context:    ".len() as u16),
+            PlanField::Quant => (6u16, "  Quant:      ".len() as u16),
+            PlanField::TargetTps => (7u16, "  Target TPS: ".len() as u16),
+        };
+        let x = area.x + 1 + label_len + app.plan_cursor_position as u16;
+        let y = area.y + 1 + row_offset;
+        if x < area.x + area.width.saturating_sub(1) && y < area.y + area.height.saturating_sub(1) {
+            frame.set_cursor_position((x, y));
+        }
+    }
+}
+
+fn draw_plan(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
+    let Some(model_name) = app.plan_model_name() else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(tc.border))
+            .title(" Planner ");
+        frame.render_widget(block, area);
+        return;
+    };
+
+    let field_style = |field: PlanField| {
+        if app.input_mode == InputMode::Plan && app.plan_field == field {
+            Style::default()
+                .fg(tc.accent_secondary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(tc.fg)
+        }
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Model: ", Style::default().fg(tc.muted)),
+            Span::styled(model_name, Style::default().fg(tc.fg).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Note: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                "Estimate-based using current llmfit fit/speed heuristics.",
+                Style::default().fg(tc.warning),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Inputs (editable)",
+            Style::default().fg(tc.accent),
+        )),
+        Line::from(vec![
+            Span::styled("  Context:    ", Style::default().fg(tc.muted)),
+            Span::styled(
+                if app.plan_context_input.is_empty() {
+                    "<required>"
+                } else {
+                    app.plan_context_input.as_str()
+                },
+                field_style(PlanField::Context),
+            ),
+            Span::styled(" tokens", Style::default().fg(tc.muted)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Quant:      ", Style::default().fg(tc.muted)),
+            Span::styled(
+                if app.plan_quant_input.is_empty() {
+                    "<auto>"
+                } else {
+                    app.plan_quant_input.as_str()
+                },
+                field_style(PlanField::Quant),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Target TPS: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                if app.plan_target_tps_input.is_empty() {
+                    "<none>"
+                } else {
+                    app.plan_target_tps_input.as_str()
+                },
+                field_style(PlanField::TargetTps),
+            ),
+            Span::styled(" tok/s", Style::default().fg(tc.muted)),
+        ]),
+        Line::from(""),
+    ];
+
+    if let Some(err) = &app.plan_error {
+        lines.push(Line::from(vec![
+            Span::styled("  Error: ", Style::default().fg(tc.error)),
+            Span::styled(err, Style::default().fg(tc.error).bold()),
+        ]));
+    } else if let Some(plan) = &app.plan_estimate {
+        lines.push(Line::from(Span::styled(
+            "  Minimum Hardware",
+            Style::default().fg(tc.accent),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("  VRAM: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                plan.minimum
+                    .vram_gb
+                    .map(|v| format!("{v:.1} GB"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                Style::default().fg(tc.fg),
+            ),
+            Span::styled("   RAM: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1} GB", plan.minimum.ram_gb),
+                Style::default().fg(tc.fg),
+            ),
+            Span::styled("   CPU: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{} cores", plan.minimum.cpu_cores),
+                Style::default().fg(tc.fg),
+            ),
+        ]));
+        lines.push(Line::from(" "));
+        lines.push(Line::from(Span::styled(
+            "  Recommended Hardware",
+            Style::default().fg(tc.accent),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("  VRAM: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                plan.recommended
+                    .vram_gb
+                    .map(|v| format!("{v:.1} GB"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                Style::default().fg(tc.fg),
+            ),
+            Span::styled("   RAM: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1} GB", plan.recommended.ram_gb),
+                Style::default().fg(tc.fg),
+            ),
+            Span::styled("   CPU: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{} cores", plan.recommended.cpu_cores),
+                Style::default().fg(tc.fg),
+            ),
+        ]));
+        lines.push(Line::from(" "));
+        lines.push(Line::from(Span::styled(
+            "  Run Paths",
+            Style::default().fg(tc.accent),
+        )));
+
+        for path in &plan.run_paths {
+            let path_color = if path.feasible { tc.good } else { tc.error };
+            let status = if path.feasible { "yes" } else { "no" };
+            lines.push(Line::from(vec![
+                Span::styled("  - ", Style::default().fg(tc.muted)),
+                Span::styled(path.path.label(), Style::default().fg(tc.fg).bold()),
+                Span::styled(": ", Style::default().fg(tc.muted)),
+                Span::styled(status, Style::default().fg(path_color)),
+                Span::styled("  tps=", Style::default().fg(tc.muted)),
+                Span::styled(
+                    path.estimated_tps
+                        .map(|t| format!("{t:.1}"))
+                        .unwrap_or_else(|| "-".to_string()),
+                    Style::default().fg(tc.fg),
+                ),
+                Span::styled("  fit=", Style::default().fg(tc.muted)),
+                Span::styled(
+                    path.fit_level
+                        .map(|f| match f {
+                            FitLevel::Perfect => "Perfect",
+                            FitLevel::Good => "Good",
+                            FitLevel::Marginal => "Marginal",
+                            FitLevel::TooTight => "Too Tight",
+                        })
+                        .unwrap_or("-"),
+                    Style::default().fg(path_color),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(" "));
+        lines.push(Line::from(Span::styled(
+            "  Upgrade Deltas",
+            Style::default().fg(tc.accent),
+        )));
+        if plan.upgrade_deltas.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  - none required",
+                Style::default().fg(tc.good),
+            )));
+        } else {
+            for delta in &plan.upgrade_deltas {
+                lines.push(Line::from(Span::styled(
+                    format!("  - {}", delta.description),
+                    Style::default().fg(tc.fg),
+                )));
+            }
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.border))
+        .title(format!(" Plan: {} ", model_name))
+        .title_style(Style::default().fg(tc.fg).bold());
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn draw_provider_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
@@ -1064,7 +1279,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 };
                 (
                     format!(
-                        " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme{}  p:providers  q:quit",
+                        " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme  p:plan{}  P:providers  q:quit",
                         detail_key, ollama_keys,
                     ),
                     "NORMAL",
@@ -1073,6 +1288,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             InputMode::Search => (
                 "  Type to search  Esc:done  Ctrl-U:clear".to_string(),
                 "SEARCH",
+            ),
+            InputMode::Plan => (
+                "  Tab/jk:field  ←/→:cursor  type:edit  Backspace/Delete  Ctrl-U:clear  Esc:close"
+                    .to_string(),
+                "PLAN",
             ),
             InputMode::ProviderPopup => (
                 "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),
@@ -1136,7 +1356,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             };
             (
                 format!(
-                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme{}  p:providers  q:quit",
+                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme  p:plan{}  P:providers  q:quit",
                     detail_key, ollama_keys,
                 ),
                 "NORMAL",
@@ -1145,6 +1365,11 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
         InputMode::Search => (
             "  Type to search  Esc:done  Ctrl-U:clear".to_string(),
             "SEARCH",
+        ),
+        InputMode::Plan => (
+            "  Tab/jk:field  ←/→:cursor  type:edit  Backspace/Delete  Ctrl-U:clear  Esc:close"
+                .to_string(),
+            "PLAN",
         ),
         InputMode::ProviderPopup => (
             "  ↑↓/jk:navigate  Space:toggle  a:all/none  Esc:close".to_string(),

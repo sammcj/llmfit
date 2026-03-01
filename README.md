@@ -94,7 +94,8 @@ Launches the interactive terminal UI. Your system specs (CPU, RAM, GPU name, VRA
 | `f` | Cycle fit filter: All, Runnable, Perfect, Good, Marginal |
 | `s` | Cycle sort column: Score, Params, Mem%, Ctx, Date, Use Case |
 | `t` | Cycle color theme (saved automatically) |
-| `p` | Open provider filter popup |
+| `p` | Open Plan mode for selected model (hardware planning) |
+| `P` | Open provider filter popup |
 | `i` | Toggle installed-first sorting (any detected runtime provider) |
 | `d` | Download selected model (provider picker when multiple are available) |
 | `r` | Refresh installed models from runtime providers |
@@ -103,6 +104,26 @@ Launches the interactive terminal UI. Your system specs (CPU, RAM, GPU name, VRA
 | `PgUp` / `PgDn` | Scroll by 10 |
 | `g` / `G` | Jump to top / bottom |
 | `q` | Quit |
+
+### TUI Plan mode (`p`)
+
+Plan mode inverts normal fit analysis: instead of asking "what fits my hardware?", it estimates "what hardware is needed for this model config?".
+
+Use `p` on a selected row, then:
+
+| Key | Action |
+|---|---|
+| `Tab` / `j` / `k` | Move between editable fields (Context, Quant, Target TPS) |
+| `Left` / `Right` | Move cursor in current field |
+| Type | Edit current field |
+| `Backspace` / `Delete` | Remove characters |
+| `Ctrl-U` | Clear current field |
+| `Esc` or `q` | Exit Plan mode |
+
+Plan mode shows estimate-based:
+- minimum and recommended VRAM/RAM/CPU cores
+- feasible run paths (GPU, CPU offload, CPU-only)
+- upgrade deltas to reach better fit targets
 
 ### Themes
 
@@ -145,6 +166,11 @@ llmfit recommend --json --limit 5
 
 # Recommendations filtered by use case
 llmfit recommend --json --use-case coding --limit 3
+
+# Plan required hardware for a specific model configuration
+llmfit plan "Qwen/Qwen3-4B-MLX-4bit" --context 8192
+llmfit plan "Qwen/Qwen3-4B-MLX-4bit" --context 8192 --quant mlx-4bit
+llmfit plan "Qwen/Qwen3-4B-MLX-4bit" --context 8192 --target-tps 25 --json
 ```
 
 ### GPU memory override
@@ -191,7 +217,14 @@ Add `--json` to any subcommand for machine-readable output:
 llmfit --json system     # Hardware specs as JSON
 llmfit --json fit -n 10  # Top 10 fits as JSON
 llmfit recommend --json  # Top 5 recommendations (JSON is default for recommend)
+llmfit plan "Qwen/Qwen2.5-Coder-0.5B-Instruct" --context 8192 --json
 ```
+
+`plan` JSON includes stable fields for:
+- request (`context`, `quantization`, `target_tps`)
+- estimated minimum/recommended hardware
+- per-path feasibility (`gpu`, `cpu_offload`, `cpu_only`)
+- upgrade deltas
 
 ---
 

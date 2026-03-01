@@ -1,6 +1,7 @@
 use llmfit_core::fit::{FitLevel, ModelFit, SortColumn, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
+use llmfit_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan};
 use llmfit_core::providers::{
     self, LlamaCppProvider, MlxProvider, ModelProvider, OllamaProvider, PullEvent, PullHandle,
 };
@@ -14,8 +15,34 @@ use crate::theme::Theme;
 pub enum InputMode {
     Normal,
     Search,
+    Plan,
     ProviderPopup,
     DownloadProviderPopup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanField {
+    Context,
+    Quant,
+    TargetTps,
+}
+
+impl PlanField {
+    fn next(self) -> Self {
+        match self {
+            PlanField::Context => PlanField::Quant,
+            PlanField::Quant => PlanField::TargetTps,
+            PlanField::TargetTps => PlanField::Context,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            PlanField::Context => PlanField::TargetTps,
+            PlanField::Quant => PlanField::Context,
+            PlanField::TargetTps => PlanField::Quant,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +134,15 @@ pub struct App {
 
     // Detail view
     pub show_detail: bool,
+    pub show_plan: bool,
+    plan_model_idx: Option<usize>,
+    pub plan_field: PlanField,
+    pub plan_context_input: String,
+    pub plan_quant_input: String,
+    pub plan_target_tps_input: String,
+    pub plan_cursor_position: usize,
+    pub plan_estimate: Option<PlanEstimate>,
+    pub plan_error: Option<String>,
 
     // Provider popup
     pub provider_cursor: usize,
@@ -226,6 +262,15 @@ impl App {
             sort_column: SortColumn::Score,
             selected_row: 0,
             show_detail: false,
+            show_plan: false,
+            plan_model_idx: None,
+            plan_field: PlanField::Context,
+            plan_context_input: String::new(),
+            plan_quant_input: String::new(),
+            plan_target_tps_input: String::new(),
+            plan_cursor_position: 0,
+            plan_estimate: None,
+            plan_error: None,
             provider_cursor: 0,
             download_provider_cursor: 0,
             download_provider_options: Vec::new(),
@@ -435,7 +480,180 @@ impl App {
     }
 
     pub fn toggle_detail(&mut self) {
+        self.show_plan = false;
         self.show_detail = !self.show_detail;
+    }
+
+    pub fn open_plan_mode(&mut self) {
+        let Some(&fit_idx) = self.filtered_fits.get(self.selected_row) else {
+            return;
+        };
+        let fit = &self.all_fits[fit_idx];
+
+        self.show_detail = false;
+        self.show_plan = true;
+        self.input_mode = InputMode::Plan;
+        self.plan_model_idx = Some(fit_idx);
+        self.plan_field = PlanField::Context;
+        self.plan_context_input = fit.model.context_length.min(8192).to_string();
+        self.plan_quant_input = fit.model.quantization.clone();
+        self.plan_target_tps_input.clear();
+        self.plan_cursor_position = self.plan_context_input.len();
+        self.refresh_plan_estimate();
+    }
+
+    pub fn close_plan_mode(&mut self) {
+        self.show_plan = false;
+        self.plan_model_idx = None;
+        self.plan_estimate = None;
+        self.plan_error = None;
+        self.input_mode = InputMode::Normal;
+    }
+
+    pub fn plan_next_field(&mut self) {
+        self.plan_field = self.plan_field.next();
+        self.plan_cursor_position = self.active_plan_input().len();
+    }
+
+    pub fn plan_prev_field(&mut self) {
+        self.plan_field = self.plan_field.prev();
+        self.plan_cursor_position = self.active_plan_input().len();
+    }
+
+    pub fn plan_cursor_left(&mut self) {
+        if self.plan_cursor_position > 0 {
+            self.plan_cursor_position -= 1;
+        }
+    }
+
+    pub fn plan_cursor_right(&mut self) {
+        let len = self.active_plan_input().len();
+        if self.plan_cursor_position < len {
+            self.plan_cursor_position += 1;
+        }
+    }
+
+    pub fn plan_input(&mut self, c: char) {
+        match self.plan_field {
+            PlanField::Context => {
+                if !c.is_ascii_digit() {
+                    return;
+                }
+            }
+            PlanField::Quant => {
+                if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                    return;
+                }
+            }
+            PlanField::TargetTps => {
+                if !(c.is_ascii_digit() || c == '.') {
+                    return;
+                }
+                if c == '.' && self.plan_target_tps_input.contains('.') {
+                    return;
+                }
+            }
+        }
+
+        let cursor = self.plan_cursor_position;
+        let input = self.active_plan_input_mut();
+        if cursor <= input.len() {
+            input.insert(cursor, c);
+            self.plan_cursor_position = cursor + 1;
+            self.refresh_plan_estimate();
+        }
+    }
+
+    pub fn plan_backspace(&mut self) {
+        if self.plan_cursor_position == 0 {
+            return;
+        }
+        let cursor = self.plan_cursor_position;
+        let input = self.active_plan_input_mut();
+        if cursor <= input.len() {
+            input.remove(cursor - 1);
+            self.plan_cursor_position = cursor - 1;
+            self.refresh_plan_estimate();
+        }
+    }
+
+    pub fn plan_delete(&mut self) {
+        let cursor = self.plan_cursor_position;
+        let input = self.active_plan_input_mut();
+        if cursor < input.len() {
+            input.remove(cursor);
+            self.refresh_plan_estimate();
+        }
+    }
+
+    pub fn plan_clear_field(&mut self) {
+        self.active_plan_input_mut().clear();
+        self.plan_cursor_position = 0;
+        self.refresh_plan_estimate();
+    }
+
+    pub fn refresh_plan_estimate(&mut self) {
+        let Some(model_idx) = self.plan_model_idx else {
+            self.plan_estimate = None;
+            self.plan_error = Some("No model selected for plan".to_string());
+            return;
+        };
+        let Some(fit) = self.all_fits.get(model_idx) else {
+            self.plan_estimate = None;
+            self.plan_error = Some("Selected model is no longer available".to_string());
+            return;
+        };
+
+        let context = match self.plan_context_input.trim().parse::<u32>() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                self.plan_estimate = None;
+                self.plan_error = Some("Context must be a positive integer".to_string());
+                return;
+            }
+        };
+
+        let quant = if self.plan_quant_input.trim().is_empty() {
+            None
+        } else {
+            Some(self.plan_quant_input.trim().to_string())
+        };
+
+        let target_tps = if self.plan_target_tps_input.trim().is_empty() {
+            None
+        } else {
+            match self.plan_target_tps_input.trim().parse::<f64>() {
+                Ok(v) if v > 0.0 => Some(v),
+                _ => {
+                    self.plan_estimate = None;
+                    self.plan_error = Some("Target TPS must be a positive number".to_string());
+                    return;
+                }
+            }
+        };
+
+        let request = PlanRequest {
+            context,
+            quant,
+            target_tps,
+        };
+
+        match estimate_model_plan(&fit.model, &request, &self.specs) {
+            Ok(plan) => {
+                self.plan_estimate = Some(plan);
+                self.plan_error = None;
+            }
+            Err(e) => {
+                self.plan_estimate = None;
+                self.plan_error = Some(e);
+            }
+        }
+    }
+
+    pub fn plan_model_name(&self) -> Option<&str> {
+        self.plan_model_idx
+            .and_then(|idx| self.all_fits.get(idx))
+            .map(|fit| fit.model.name.as_str())
     }
 
     pub fn open_provider_popup(&mut self) {
@@ -782,6 +1000,22 @@ impl App {
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
+        }
+    }
+
+    fn active_plan_input(&self) -> &String {
+        match self.plan_field {
+            PlanField::Context => &self.plan_context_input,
+            PlanField::Quant => &self.plan_quant_input,
+            PlanField::TargetTps => &self.plan_target_tps_input,
+        }
+    }
+
+    fn active_plan_input_mut(&mut self) -> &mut String {
+        match self.plan_field {
+            PlanField::Context => &mut self.plan_context_input,
+            PlanField::Quant => &mut self.plan_quant_input,
+            PlanField::TargetTps => &mut self.plan_target_tps_input,
         }
     }
 }

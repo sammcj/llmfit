@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use llmfit_core::fit::{ModelFit, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
+use llmfit_core::plan::{PlanRequest, estimate_model_plan, resolve_model_selector};
 
 #[derive(Parser)]
 #[command(name = "llmfit")]
@@ -30,7 +31,7 @@ struct Cli {
     cli: bool,
 
     /// Output results as JSON (for tool integration)
-    #[arg(long)]
+    #[arg(long, global = true)]
     json: bool,
 
     /// Override GPU VRAM size (e.g. "32G", "32000M", "1.5T").
@@ -73,6 +74,24 @@ enum Commands {
     Info {
         /// Model name or partial name to look up
         model: String,
+    },
+
+    /// Plan hardware requirements for a specific model configuration
+    Plan {
+        /// Model selector (name or unique partial name)
+        model: String,
+
+        /// Context length for estimation (tokens)
+        #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u32).range(1..))]
+        context: u32,
+
+        /// Quantization override (e.g. Q4_K_M, Q8_0, mlx-4bit)
+        #[arg(long)]
+        quant: Option<String>,
+
+        /// Target decode speed in tokens/sec
+        #[arg(long, value_name = "TOK_S")]
+        target_tps: Option<f64>,
     },
 
     /// Recommend top models for your hardware (JSON-friendly)
@@ -710,6 +729,35 @@ fn run_model(model: &str, server: bool, port: u16, ngl: i32, ctx_size: u32) {
     }
 }
 
+fn run_plan(
+    model_selector: &str,
+    context: u32,
+    quant: Option<String>,
+    target_tps: Option<f64>,
+    json: bool,
+    memory_override: &Option<String>,
+) -> Result<(), String> {
+    let db = ModelDatabase::new();
+    let specs = detect_specs(memory_override);
+    let model = resolve_model_selector(db.get_all_models(), model_selector)?;
+
+    let request = PlanRequest {
+        context,
+        quant,
+        target_tps,
+    };
+    let plan = estimate_model_plan(model, &request, &specs)?;
+
+    if json {
+        display::display_json_plan(&plan);
+    } else {
+        specs.display();
+        display::display_model_plan(&plan);
+    }
+
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     let context_limit = resolve_context_limit(cli.max_context);
@@ -764,6 +812,20 @@ fn main() {
                     display::display_json_fits(&specs, &[fit]);
                 } else {
                     display::display_model_detail(&fit);
+                }
+            }
+
+            Commands::Plan {
+                model,
+                context,
+                quant,
+                target_tps,
+            } => {
+                if let Err(err) =
+                    run_plan(&model, context, quant, target_tps, cli.json, &cli.memory)
+                {
+                    eprintln!("Error: {}", err);
+                    std::process::exit(1);
                 }
             }
 

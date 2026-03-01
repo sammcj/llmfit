@@ -18,6 +18,7 @@ pub fn handle_events(app: &mut App) -> std::io::Result<bool> {
         match app.input_mode {
             InputMode::Normal => handle_normal_mode(app, key),
             InputMode::Search => handle_search_mode(app, key),
+            InputMode::Plan => handle_plan_mode(app, key),
             InputMode::ProviderPopup => handle_provider_popup_mode(app, key),
             InputMode::DownloadProviderPopup => handle_download_provider_popup_mode(app, key),
         }
@@ -59,8 +60,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         // Theme
         KeyCode::Char('t') => app.cycle_theme(),
 
+        // Plan view
+        KeyCode::Char('p') => app.open_plan_mode(),
+
         // Provider popup
-        KeyCode::Char('p') => app.open_provider_popup(),
+        KeyCode::Char('P') => app.open_provider_popup(),
 
         // Installed-first sort toggle (any provider)
         KeyCode::Char('i')
@@ -115,7 +119,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) {
 
 fn handle_provider_popup_mode(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char('q') => app.close_provider_popup(),
+        KeyCode::Esc | KeyCode::Char('P') | KeyCode::Char('q') => app.close_provider_popup(),
 
         KeyCode::Up | KeyCode::Char('k') => app.provider_popup_up(),
         KeyCode::Down | KeyCode::Char('j') => app.provider_popup_down(),
@@ -124,6 +128,23 @@ fn handle_provider_popup_mode(app: &mut App, key: KeyEvent) {
 
         KeyCode::Char('a') => app.provider_popup_select_all(),
 
+        _ => {}
+    }
+}
+
+fn handle_plan_mode(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.close_plan_mode(),
+        KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => app.plan_next_field(),
+        KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => app.plan_prev_field(),
+        KeyCode::Left => app.plan_cursor_left(),
+        KeyCode::Right => app.plan_cursor_right(),
+        KeyCode::Backspace => app.plan_backspace(),
+        KeyCode::Delete => app.plan_delete(),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.plan_clear_field()
+        }
+        KeyCode::Char(c) => app.plan_input(c),
         _ => {}
     }
 }
