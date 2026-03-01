@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::theme::ThemeColors;
-use crate::tui_app::{App, DownloadCapability, DownloadProvider, FitFilter, InputMode, PlanField};
+use crate::tui_app::{App, AvailabilityFilter, DownloadCapability, DownloadProvider, FitFilter, InputMode, PlanField};
 use llmfit_core::fit::FitLevel;
 use llmfit_core::fit::SortColumn;
 use llmfit_core::hardware::is_running_in_wsl;
@@ -202,6 +202,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
             Constraint::Length(24), // provider summary
             Constraint::Length(18), // sort column
             Constraint::Length(20), // fit filter
+            Constraint::Length(20), // availability filter
             Constraint::Length(16), // theme
         ])
         .split(area);
@@ -303,6 +304,24 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         .block(fit_block);
     frame.render_widget(fit_text, chunks[3]);
 
+    // Availability filter
+    let avail_style = match app.availability_filter {
+        AvailabilityFilter::All => Style::default().fg(tc.fg),
+        AvailabilityFilter::HasGguf => Style::default().fg(tc.info),
+        AvailabilityFilter::Installed => Style::default().fg(tc.good),
+    };
+
+    let avail_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(tc.border))
+        .title(" Avail [a] ")
+        .title_style(Style::default().fg(tc.muted));
+
+    let avail_text =
+        Paragraph::new(Line::from(Span::styled(app.availability_filter.label(), avail_style)))
+            .block(avail_block);
+    frame.render_widget(avail_text, chunks[4]);
+
     // Theme indicator
     let theme_block = Block::default()
         .borders(Borders::ALL)
@@ -315,7 +334,7 @@ fn draw_search_and_filters(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeC
         Style::default().fg(tc.info),
     )))
     .block(theme_block);
-    frame.render_widget(theme_text, chunks[4]);
+    frame.render_widget(theme_text, chunks[5]);
 }
 
 fn fit_color(level: FitLevel, tc: &ThemeColors) -> Color {
