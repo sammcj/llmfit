@@ -79,6 +79,32 @@ impl FitFilter {
     }
 }
 
+/// Filter by model availability / download readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvailabilityFilter {
+    All,
+    HasGguf,     // Has GGUF download sources (unsloth, bartowski, etc.)
+    Installed,   // Already installed in a local runtime
+}
+
+impl AvailabilityFilter {
+    pub fn label(&self) -> &str {
+        match self {
+            AvailabilityFilter::All => "All",
+            AvailabilityFilter::HasGguf => "GGUF Avail",
+            AvailabilityFilter::Installed => "Installed",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            AvailabilityFilter::All => AvailabilityFilter::HasGguf,
+            AvailabilityFilter::HasGguf => AvailabilityFilter::Installed,
+            AvailabilityFilter::Installed => AvailabilityFilter::All,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DownloadProvider {
     Ollama,
@@ -126,6 +152,7 @@ pub struct App {
 
     // Filters
     pub fit_filter: FitFilter,
+    pub availability_filter: AvailabilityFilter,
     pub installed_first: bool,
     pub sort_column: SortColumn,
 
@@ -258,6 +285,7 @@ impl App {
             providers: model_providers,
             selected_providers,
             fit_filter: FitFilter::All,
+            availability_filter: AvailabilityFilter::All,
             installed_first: false,
             sort_column: SortColumn::Score,
             selected_row: 0,
@@ -355,7 +383,14 @@ impl App {
                     FitFilter::Runnable => fit.fit_level != FitLevel::TooTight,
                 };
 
-                matches_search && matches_provider && matches_fit
+                // Availability filter
+                let matches_availability = match self.availability_filter {
+                    AvailabilityFilter::All => true,
+                    AvailabilityFilter::HasGguf => !fit.model.gguf_sources.is_empty(),
+                    AvailabilityFilter::Installed => fit.installed,
+                };
+
+                matches_search && matches_provider && matches_fit && matches_availability
             })
             .map(|(i, _)| i)
             .collect();
@@ -431,6 +466,11 @@ impl App {
 
     pub fn cycle_fit_filter(&mut self) {
         self.fit_filter = self.fit_filter.next();
+        self.apply_filters();
+    }
+
+    pub fn cycle_availability_filter(&mut self) {
+        self.availability_filter = self.availability_filter.next();
         self.apply_filters();
     }
 
