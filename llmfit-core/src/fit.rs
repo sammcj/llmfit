@@ -652,7 +652,27 @@ pub fn rank_models_by_fit_opts_col(
 // ────────────────────────────────────────────────────────────────────
 
 /// Estimate tokens per second for a model on given hardware.
-/// Based on backend speed constants / model params * quant multiplier.
+/// Estimate tokens per second for a model on the given hardware.
+///
+/// LLM token generation is **memory-bandwidth-bound**: each generated token
+/// requires reading the full model weights once from VRAM. The theoretical
+/// upper bound is therefore:
+///
+///   max_tps = memory_bandwidth_GB_s / model_size_GB
+///
+/// In practice, real throughput is ~50–70% of this ceiling due to kernel
+/// launch overhead, KV-cache reads, and other fixed costs.
+///
+/// When the GPU model is recognized, we use its **actual memory bandwidth**
+/// (from the lookup table in `hardware::gpu_memory_bandwidth_gbps`) to
+/// produce a physics-grounded estimate. Otherwise we fall back to the
+/// original per-backend constant `K`.
+///
+/// References:
+///  - kipply, "Transformer Inference Arithmetic" (2022)
+///  - ggerganov, llama.cpp Apple Silicon benchmarks (Discussion #4167)
+///  - Google, "Efficiently Scaling Transformer Inference" (arXiv:2211.05102)
+///  - ggerganov, llama.cpp NVIDIA T4 benchmarks (Discussion #4225)
 fn estimate_tps(
     model: &LlmModel,
     quant: &str,
@@ -660,7 +680,55 @@ fn estimate_tps(
     run_mode: RunMode,
     runtime: InferenceRuntime,
 ) -> f64 {
-    // Backend speed constant K (higher = faster)
+    use crate::hardware::gpu_memory_bandwidth_gbps;
+
+    let params = model.params_b().max(0.1);
+
+    // ── Bandwidth-based estimation (preferred) ─────────────────────
+    //
+    // If we know the GPU's memory bandwidth, estimate tok/s from first
+    // principles instead of using a fixed constant.
+    //
+    // model_bytes = params_B * bytes_per_param(quant)
+    // raw_tps     = bandwidth_GB_s / model_bytes_GB
+    // estimated   = raw_tps * efficiency * run_mode_factor
+    //
+    // The efficiency factor (0.55) accounts for:
+    //  - Kernel launch / scheduling overhead
+    //  - KV-cache memory reads (not captured in model size)
+    //  - Memory controller inefficiency at high utilization
+    //
+    // Validated against:
+    //  - RTX 4090 (1008 GB/s): Qwen3.5-27B Q4 → ~40 tok/s measured
+    //  - T4 (320 GB/s): 7B F16 → ~16 tok/s (ggerganov benchmark)
+    //  - Apple M1 Max (400 GB/s): 7B Q4_0 → ~61 tok/s (ggerganov benchmark)
+    let gpu_name = system.gpu_name.as_deref().unwrap_or("");
+    let bandwidth = gpu_memory_bandwidth_gbps(gpu_name);
+
+    if run_mode != RunMode::CpuOnly {
+        if let Some(bw) = bandwidth {
+            let bytes_per_param = models::quant_bytes_per_param(quant);
+            let model_gb = params * bytes_per_param;
+
+            // Efficiency factor — captures overhead not in the simple
+            // bandwidth / model-size formula.
+            let efficiency = 0.55;
+            let raw_tps = (bw / model_gb) * efficiency;
+
+            let mode_factor = match run_mode {
+                RunMode::Gpu => 1.0,
+                RunMode::MoeOffload => 0.8,
+                RunMode::CpuOffload => 0.5,
+                RunMode::CpuOnly => unreachable!(),
+            };
+
+            return (raw_tps * mode_factor).max(0.1);
+        }
+    }
+
+    // ── Fallback: fixed-constant approach ──────────────────────────
+    // Used when the GPU is not recognized (custom/unnamed GPUs,
+    // synthetic entries from --memory override, etc.).
     let k: f64 = match (system.backend, runtime) {
         (GpuBackend::Metal, InferenceRuntime::Mlx) => 250.0,
         (GpuBackend::Metal, InferenceRuntime::LlamaCpp) => 160.0,
@@ -673,7 +741,6 @@ fn estimate_tps(
         (GpuBackend::Ascend, _) => 390.0,
     };
 
-    let params = model.params_b().max(0.1);
     let mut base = k / params;
 
     // Quantization speed multiplier
@@ -1445,5 +1512,141 @@ mod tests {
         assert_eq!(ranked[0].model.name, "New Model");
         assert_eq!(ranked[1].model.name, "Old Model");
         assert_eq!(ranked[2].model.name, "No Date Model");
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Bandwidth-based speed estimation tests
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Helper: create a test system with a specific GPU name for bandwidth lookup.
+    fn test_system_with_gpu(ram: f64, vram: f64, gpu_name: &str) -> SystemSpecs {
+        SystemSpecs {
+            total_ram_gb: ram,
+            available_ram_gb: ram * 0.8,
+            total_cpu_cores: 8,
+            cpu_name: "Test CPU".to_string(),
+            has_gpu: true,
+            gpu_vram_gb: Some(vram),
+            total_gpu_vram_gb: Some(vram),
+            gpu_name: Some(gpu_name.to_string()),
+            gpu_count: 1,
+            unified_memory: false,
+            backend: GpuBackend::Cuda,
+            gpus: vec![],
+        }
+    }
+
+    #[test]
+    fn test_bandwidth_estimation_rtx4090_faster_than_rtx3060() {
+        let model = test_model("27B", 16.0, Some(16.0));
+        let sys_4090 = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 4090");
+        let sys_3060 = test_system_with_gpu(64.0, 12.0, "NVIDIA GeForce RTX 3060");
+
+        let tps_4090 = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &sys_4090,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+        let tps_3060 = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &sys_3060,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+
+        // RTX 4090 (1008 GB/s) should be ~2.8x faster than RTX 3060 (360 GB/s)
+        assert!(
+            tps_4090 > tps_3060 * 2.0,
+            "4090={tps_4090}, 3060={tps_3060}"
+        );
+    }
+
+    #[test]
+    fn test_bandwidth_estimation_rtx4090_27b_q4_realistic() {
+        // Validated against real-world measurement:
+        // Qwen3.5-27B UD-Q4_K_XL on RTX 4090 → ~40 tok/s
+        let model = test_model("27B", 16.0, Some(16.0));
+        let system = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 4090");
+
+        let tps = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+
+        // Should be in the 30-50 tok/s range (measured: ~40)
+        assert!(tps > 25.0 && tps < 55.0, "RTX 4090 27B Q4 tok/s = {tps}");
+    }
+
+    #[test]
+    fn test_bandwidth_estimation_t4_7b_f16_realistic() {
+        // Validated against ggerganov's T4 benchmark (Discussion #4225):
+        // OpenHermes 7B F16 on T4 → ~16 tok/s
+        let model = test_model("7B", 14.0, Some(14.0));
+        let system = test_system_with_gpu(16.0, 16.0, "Tesla T4");
+
+        let tps = estimate_tps(
+            &model,
+            "F16",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+
+        // Should be in the 10-25 tok/s range (measured: ~16)
+        assert!(tps > 8.0 && tps < 30.0, "T4 7B F16 tok/s = {tps}");
+    }
+
+    #[test]
+    fn test_bandwidth_estimation_unknown_gpu_uses_fallback() {
+        // Unknown GPU names should still produce reasonable estimates
+        // via the fallback constant-K path.
+        let model = test_model("7B", 4.0, Some(4.0));
+        let system = test_system_with_gpu(16.0, 10.0, "Some Unknown GPU");
+
+        let tps = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+
+        // Should fall back to K=220 path and produce a positive value
+        assert!(tps > 0.0, "unknown GPU should still produce an estimate");
+    }
+
+    #[test]
+    fn test_bandwidth_estimation_cpu_only_ignores_bandwidth() {
+        // CPU-only mode should NOT use GPU bandwidth, even if GPU is known.
+        let model = test_model("7B", 4.0, Some(4.0));
+        let sys_4090 = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 4090");
+        let sys_unknown = test_system_with_gpu(64.0, 24.0, "Unknown GPU");
+
+        let tps_4090 = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &sys_4090,
+            RunMode::CpuOnly,
+            InferenceRuntime::LlamaCpp,
+        );
+        let tps_unknown = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &sys_unknown,
+            RunMode::CpuOnly,
+            InferenceRuntime::LlamaCpp,
+        );
+
+        // CPU-only should produce the same result regardless of GPU
+        assert!(
+            (tps_4090 - tps_unknown).abs() < 0.01,
+            "CPU-only should ignore GPU: 4090={tps_4090}, unknown={tps_unknown}"
+        );
     }
 }

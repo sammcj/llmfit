@@ -1325,6 +1325,315 @@ fn read_proc_meminfo_total_gb() -> Option<f64> {
     None
 }
 
+/// Estimate GPU memory bandwidth in GB/s from the GPU model name.
+///
+/// Token generation in LLM inference is memory-bandwidth-bound (each token
+/// requires reading the full model weights once). Using per-GPU bandwidth
+/// produces significantly more accurate tok/s estimates than a single
+/// constant for all CUDA/ROCm/Metal devices.
+///
+/// References:
+///  - kipply, "Transformer Inference Arithmetic" (2022)
+///  - ggerganov, llama.cpp Apple Silicon benchmarks (Discussion #4167)
+///  - Google, "Efficiently Scaling Transformer Inference" (arXiv:2211.05102)
+///  - ggerganov, llama.cpp NVIDIA T4 benchmarks (Discussion #4225)
+///
+/// Returns `None` when the GPU is not recognized; callers should fall back
+/// to the existing fixed-constant approach.
+pub fn gpu_memory_bandwidth_gbps(name: &str) -> Option<f64> {
+    let lower = name.to_lowercase();
+
+    // ── NVIDIA Consumer (GeForce) ──────────────────────────────────
+    // RTX 50 series (Blackwell)
+    if lower.contains("5090") {
+        return Some(1792.0);
+    }
+    if lower.contains("5080") {
+        return Some(960.0);
+    }
+    if lower.contains("5070 ti") {
+        return Some(896.0);
+    }
+    if lower.contains("5070") {
+        return Some(672.0);
+    }
+    if lower.contains("5060 ti") {
+        return Some(448.0);
+    }
+    if lower.contains("5060") {
+        return Some(256.0);
+    }
+
+    // RTX 40 series (Ada Lovelace)
+    if lower.contains("4090") {
+        return Some(1008.0);
+    }
+    if lower.contains("4080 super") {
+        return Some(736.0);
+    }
+    if lower.contains("4080") {
+        return Some(717.0);
+    }
+    if lower.contains("4070 ti super") {
+        return Some(672.0);
+    }
+    if lower.contains("4070 ti") {
+        return Some(504.0);
+    }
+    if lower.contains("4070 super") {
+        return Some(504.0);
+    }
+    if lower.contains("4070") {
+        return Some(504.0);
+    }
+    if lower.contains("4060 ti") {
+        return Some(288.0);
+    }
+    if lower.contains("4060") {
+        return Some(272.0);
+    }
+
+    // RTX 30 series (Ampere)
+    if lower.contains("3090 ti") {
+        return Some(1008.0);
+    }
+    if lower.contains("3090") {
+        return Some(936.0);
+    }
+    if lower.contains("3080 ti") {
+        return Some(912.0);
+    }
+    if lower.contains("3080") {
+        return Some(760.0);
+    }
+    if lower.contains("3070 ti") {
+        return Some(608.0);
+    }
+    if lower.contains("3070") {
+        return Some(448.0);
+    }
+    if lower.contains("3060 ti") {
+        return Some(448.0);
+    }
+    if lower.contains("3060") {
+        return Some(360.0);
+    }
+
+    // RTX 20 series (Turing)
+    if lower.contains("2080 ti") {
+        return Some(616.0);
+    }
+    if lower.contains("2080 super") {
+        return Some(496.0);
+    }
+    if lower.contains("2080") {
+        return Some(448.0);
+    }
+    if lower.contains("2070 super") {
+        return Some(448.0);
+    }
+    if lower.contains("2070") {
+        return Some(448.0);
+    }
+    if lower.contains("2060 super") {
+        return Some(448.0);
+    }
+    if lower.contains("2060") {
+        return Some(336.0);
+    }
+
+    // GTX 16 series (Turing, no RT cores)
+    if lower.contains("1660 ti") {
+        return Some(288.0);
+    }
+    if lower.contains("1660 super") {
+        return Some(336.0);
+    }
+    if lower.contains("1660") {
+        return Some(192.0);
+    }
+    if lower.contains("1650 super") {
+        return Some(192.0);
+    }
+    if lower.contains("1650") {
+        return Some(128.0);
+    }
+
+    // ── NVIDIA Data Center / Professional ──────────────────────────
+    if lower.contains("h100 sxm") {
+        return Some(3350.0);
+    }
+    if lower.contains("h100") {
+        return Some(2039.0);
+    } // PCIe
+    if lower.contains("h200") {
+        return Some(4800.0);
+    }
+    if lower.contains("a100 sxm") {
+        return Some(2039.0);
+    }
+    if lower.contains("a100") {
+        return Some(1555.0);
+    } // PCIe 40GB
+    if lower.contains("l40s") {
+        return Some(864.0);
+    }
+    if lower.contains("l40") {
+        return Some(864.0);
+    }
+    if lower.contains("l4") {
+        return Some(300.0);
+    }
+    if lower.contains("a10g") {
+        return Some(600.0);
+    }
+    if lower.contains("a10") {
+        return Some(600.0);
+    }
+    if lower.contains("t4") {
+        return Some(320.0);
+    }
+    if lower.contains("v100 sxm") {
+        return Some(900.0);
+    }
+    if lower.contains("v100") {
+        return Some(897.0);
+    }
+    if lower.contains("a6000") {
+        return Some(768.0);
+    }
+    if lower.contains("a5000") {
+        return Some(768.0);
+    }
+    if lower.contains("a4000") {
+        return Some(448.0);
+    }
+
+    // ── AMD Discrete (RDNA) ────────────────────────────────────────
+    // RX 9000 series (RDNA 4)
+    if lower.contains("9070 xt") {
+        return Some(624.0);
+    }
+    if lower.contains("9070") {
+        return Some(488.0);
+    }
+
+    // RX 7000 series (RDNA 3)
+    if lower.contains("7900 xtx") {
+        return Some(960.0);
+    }
+    if lower.contains("7900 xt") {
+        return Some(800.0);
+    }
+    if lower.contains("7900 gre") {
+        return Some(576.0);
+    }
+    if lower.contains("7800 xt") {
+        return Some(624.0);
+    }
+    if lower.contains("7700 xt") {
+        return Some(432.0);
+    }
+    if lower.contains("7600") {
+        return Some(288.0);
+    }
+
+    // RX 6000 series (RDNA 2)
+    if lower.contains("6950 xt") {
+        return Some(576.0);
+    }
+    if lower.contains("6900 xt") {
+        return Some(512.0);
+    }
+    if lower.contains("6800 xt") {
+        return Some(512.0);
+    }
+    if lower.contains("6800") {
+        return Some(512.0);
+    }
+    if lower.contains("6700 xt") {
+        return Some(384.0);
+    }
+    if lower.contains("6600 xt") {
+        return Some(256.0);
+    }
+    if lower.contains("6600") {
+        return Some(224.0);
+    }
+
+    // AMD data center (CDNA)
+    if lower.contains("mi300x") {
+        return Some(5300.0);
+    }
+    if lower.contains("mi300") {
+        return Some(5300.0);
+    }
+    if lower.contains("mi250x") {
+        return Some(3277.0);
+    }
+    if lower.contains("mi250") {
+        return Some(3277.0);
+    }
+    if lower.contains("mi210") {
+        return Some(1638.0);
+    }
+    if lower.contains("mi100") {
+        return Some(1229.0);
+    }
+
+    // ── Apple Silicon (unified memory bandwidth) ───────────────────
+    if lower.contains("m4 ultra") {
+        return Some(819.0);
+    }
+    if lower.contains("m4 max") {
+        return Some(546.0);
+    }
+    if lower.contains("m4 pro") {
+        return Some(273.0);
+    }
+    if lower.contains("m4") {
+        return Some(120.0);
+    }
+    if lower.contains("m3 ultra") {
+        return Some(800.0);
+    }
+    if lower.contains("m3 max") {
+        return Some(400.0);
+    }
+    if lower.contains("m3 pro") {
+        return Some(150.0);
+    }
+    if lower.contains("m3") {
+        return Some(100.0);
+    }
+    if lower.contains("m2 ultra") {
+        return Some(800.0);
+    }
+    if lower.contains("m2 max") {
+        return Some(400.0);
+    }
+    if lower.contains("m2 pro") {
+        return Some(200.0);
+    }
+    if lower.contains("m2") {
+        return Some(100.0);
+    }
+    if lower.contains("m1 ultra") {
+        return Some(800.0);
+    }
+    if lower.contains("m1 max") {
+        return Some(400.0);
+    }
+    if lower.contains("m1 pro") {
+        return Some(200.0);
+    }
+    if lower.contains("m1") {
+        return Some(68.0);
+    }
+
+    None
+}
+
 /// Fallback VRAM estimation from GPU model name.
 /// Used when nvidia-smi or other tools report 0 VRAM.
 fn estimate_vram_from_name(name: &str) -> f64 {
@@ -1621,5 +1930,57 @@ mod tests {
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].count, 2);
         assert!(!gpus[0].unified_memory);
+    }
+
+    #[test]
+    fn test_gpu_bandwidth_known_gpus() {
+        // Spot-check a few well-known GPUs
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 4090"),
+            Some(1008.0)
+        );
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3060"),
+            Some(360.0)
+        );
+        assert_eq!(super::gpu_memory_bandwidth_gbps("Tesla T4"), Some(320.0));
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("NVIDIA H100 SXM"),
+            Some(3350.0)
+        );
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("NVIDIA A100"),
+            Some(1555.0)
+        );
+    }
+
+    #[test]
+    fn test_gpu_bandwidth_apple_silicon() {
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("Apple M1 Max"),
+            Some(400.0)
+        );
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("Apple M4 Pro"),
+            Some(273.0)
+        );
+    }
+
+    #[test]
+    fn test_gpu_bandwidth_unknown_returns_none() {
+        assert_eq!(super::gpu_memory_bandwidth_gbps("Some Random GPU"), None);
+        assert_eq!(super::gpu_memory_bandwidth_gbps(""), None);
+    }
+
+    #[test]
+    fn test_gpu_bandwidth_amd() {
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("AMD Radeon RX 7900 XTX"),
+            Some(960.0)
+        );
+        assert_eq!(
+            super::gpu_memory_bandwidth_gbps("AMD Instinct MI300X"),
+            Some(5300.0)
+        );
     }
 }

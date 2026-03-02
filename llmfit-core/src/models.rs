@@ -40,6 +40,23 @@ pub fn quant_speed_multiplier(quant: &str) -> f64 {
     }
 }
 
+/// Bytes per parameter for a given quantization format.
+/// Used by the bandwidth-based tok/s estimator to compute model size in GB.
+pub fn quant_bytes_per_param(quant: &str) -> f64 {
+    match quant {
+        "F16" | "BF16" => 2.0,
+        "Q8_0" => 1.0,
+        "Q6_K" => 0.75,
+        "Q5_K_M" => 0.625,
+        "Q4_K_M" | "Q4_0" => 0.5,
+        "Q3_K_M" => 0.375,
+        "Q2_K" => 0.25,
+        "mlx-4bit" => 0.5,
+        "mlx-8bit" => 1.0,
+        _ => 0.5, // default to ~4-bit
+    }
+}
+
 /// Quality penalty for quantization (lower quant = lower quality).
 pub fn quant_quality_penalty(quant: &str) -> f64 {
     match quant {

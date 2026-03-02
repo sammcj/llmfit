@@ -254,7 +254,15 @@ llmfit plan "Qwen/Qwen2.5-Coder-0.5B-Instruct" --context 8192 --json
 
    Dimensions are combined into a weighted composite score. Weights vary by use-case category (General, Coding, Reasoning, Chat, Multimodal, Embedding). For example, Chat weights Speed higher (0.35) while Reasoning weights Quality higher (0.55). Models are ranked by composite score, with unrunnable models (Too Tight) always at the bottom.
 
-5. **Speed estimation** -- Estimated tokens per second using backend-specific constants:
+5. **Speed estimation** -- Token generation in LLM inference is memory-bandwidth-bound: each token requires reading the full model weights once from VRAM. When the GPU model is recognized, llmfit uses its actual memory bandwidth to estimate throughput:
+
+   Formula: `(bandwidth_GB_s / model_size_GB) × efficiency_factor`
+
+   The efficiency factor (0.55) accounts for kernel overhead, KV-cache reads, and memory controller effects. This approach is validated against published benchmarks from llama.cpp ([Apple Silicon](https://github.com/ggml-org/llama.cpp/discussions/4167), [NVIDIA T4](https://github.com/ggml-org/llama.cpp/discussions/4225)) and real-world measurements.
+
+   The bandwidth lookup table covers ~80 GPUs across NVIDIA (consumer + datacenter), AMD (RDNA + CDNA), and Apple Silicon families.
+
+   For unrecognized GPUs, llmfit falls back to per-backend speed constants:
 
    | Backend | Speed constant |
    |---|---|
@@ -266,7 +274,7 @@ llmfit plan "Qwen/Qwen2.5-Coder-0.5B-Instruct" --context 8192 --json
    | CPU (x86) | 70 |
    | NPU (Ascend) | 390 |
 
-   Formula: `K / params_b × quant_speed_multiplier`, with penalties for CPU offload (0.5×), CPU-only (0.3×), and MoE expert switching (0.8×).
+   Fallback formula: `K / params_b × quant_speed_multiplier`, with penalties for CPU offload (0.5×), CPU-only (0.3×), and MoE expert switching (0.8×).
 
 6. **Fit analysis** -- Each model is evaluated for memory compatibility:
 

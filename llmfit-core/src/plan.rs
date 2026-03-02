@@ -118,6 +118,45 @@ fn estimate_tps(
     path: PlanRunPath,
     cpu_cores: usize,
 ) -> f64 {
+    estimate_tps_with_gpu(model, quant, backend, path, cpu_cores, None)
+}
+
+/// Bandwidth-aware tok/s estimation (mirrors fit.rs logic).
+/// When `gpu_name` is provided and recognized, uses memory-bandwidth-based
+/// estimation instead of fixed constants.
+fn estimate_tps_with_gpu(
+    model: &LlmModel,
+    quant: &str,
+    backend: GpuBackend,
+    path: PlanRunPath,
+    cpu_cores: usize,
+    gpu_name: Option<&str>,
+) -> f64 {
+    use crate::hardware::gpu_memory_bandwidth_gbps;
+    use crate::models::quant_bytes_per_param;
+
+    let params = model.params_b().max(0.1);
+
+    // Bandwidth-based estimation when GPU is recognized
+    if path != PlanRunPath::CpuOnly {
+        if let Some(name) = gpu_name {
+            if let Some(bw) = gpu_memory_bandwidth_gbps(name) {
+                let model_gb = params * quant_bytes_per_param(quant);
+                let efficiency = 0.55;
+                let raw_tps = (bw / model_gb) * efficiency;
+
+                let mode_factor = match path {
+                    PlanRunPath::Gpu => 1.0,
+                    PlanRunPath::CpuOffload => 0.5,
+                    PlanRunPath::CpuOnly => unreachable!(),
+                };
+
+                return (raw_tps * mode_factor).max(0.1);
+            }
+        }
+    }
+
+    // Fallback: fixed-constant approach
     let k: f64 = match backend {
         GpuBackend::Metal => 160.0,
         GpuBackend::Cuda => 220.0,
@@ -129,7 +168,6 @@ fn estimate_tps(
         GpuBackend::Ascend => 390.0,
     };
 
-    let params = model.params_b().max(0.1);
     let mut base = (k / params) * quant_speed_multiplier(quant);
 
     if cpu_cores >= 8 {
@@ -237,12 +275,14 @@ fn evaluate_current(
             gpu_vram,
             model.recommended_ram_gb,
         );
-        let gpu_tps = estimate_tps(
+        let gpu_name = system.gpu_name.as_deref();
+        let gpu_tps = estimate_tps_with_gpu(
             model,
             quant,
             system.backend,
             PlanRunPath::Gpu,
             system.total_cpu_cores,
+            gpu_name,
         );
         if target_tps.is_none_or(|t| gpu_tps >= t) {
             candidates.push((gpu_fit, PlanRunPath::Gpu, gpu_tps));
@@ -255,12 +295,13 @@ fn evaluate_current(
                 system.available_ram_gb,
                 model.recommended_ram_gb,
             );
-            let offload_tps = estimate_tps(
+            let offload_tps = estimate_tps_with_gpu(
                 model,
                 quant,
                 system.backend,
                 PlanRunPath::CpuOffload,
                 system.total_cpu_cores,
+                gpu_name,
             );
             if target_tps.is_none_or(|t| offload_tps >= t) {
                 candidates.push((offload_fit, PlanRunPath::CpuOffload, offload_tps));
@@ -348,13 +389,15 @@ fn build_path_estimate(
 
     let recommended_cores = min_cores.max(8);
 
+    let gpu_name = system.gpu_name.as_deref();
+
     match path {
         PlanRunPath::Gpu => {
             let min_vram = model_mem;
             let rec_vram = model.recommended_ram_gb.max(model_mem * 1.2);
             let min_ram = (model_mem * 0.2).max(8.0);
             let rec_ram = (min_ram * 1.25).max(12.0);
-            let tps = estimate_tps(model, quant, backend, path, min_cores);
+            let tps = estimate_tps_with_gpu(model, quant, backend, path, min_cores, gpu_name);
 
             let fit = fit_level_for(path, min_vram, min_vram, model.recommended_ram_gb);
             notes.push(
@@ -397,7 +440,7 @@ fn build_path_estimate(
             let min_ram = model_mem;
             let rec_ram = model_mem * 1.2;
             let fit = fit_level_for(path, min_ram, min_ram, model.recommended_ram_gb);
-            let tps = estimate_tps(model, quant, backend, path, min_cores);
+            let tps = estimate_tps_with_gpu(model, quant, backend, path, min_cores, gpu_name);
             notes.push("RAM is the primary memory pool for CPU offload".to_string());
 
             PathEstimate {
