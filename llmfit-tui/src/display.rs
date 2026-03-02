@@ -17,7 +17,7 @@ struct ModelRow {
     size: String,
     #[tabled(rename = "Score")]
     score: String,
-    #[tabled(rename = "tok/s")]
+    #[tabled(rename = "tok/s est.")]
     tps: String,
     #[tabled(rename = "Quant")]
     quant: String,
@@ -91,6 +91,9 @@ pub fn display_model_fits(fits: &[ModelFit]) {
 
     let table = Table::new(rows).with(Style::rounded()).to_string();
     println!("{}", table);
+    println!(
+        "  Note: tok/s values are baseline estimates; real runtime depends on engine/runtime."
+    );
 }
 
 pub fn display_model_detail(fit: &ModelFit) {
@@ -111,7 +114,7 @@ pub fn display_model_detail(fit: &ModelFit) {
         println!("{}: {}", "Released".bold(), date);
     }
     println!(
-        "{}: {} (est. ~{:.1} tok/s)",
+        "{}: {} (baseline est. ~{:.1} tok/s)",
         "Runtime".bold(),
         fit.runtime_text(),
         fit.estimated_tps
@@ -127,7 +130,7 @@ pub fn display_model_detail(fit: &ModelFit) {
         fit.score_components.fit,
         fit.score_components.context
     );
-    println!("  Estimated Speed: {:.1} tok/s", fit.estimated_tps);
+    println!("  Baseline Est. Speed: {:.1} tok/s", fit.estimated_tps);
     println!();
 
     println!("{}", "Resource Requirements:".bold().underline());

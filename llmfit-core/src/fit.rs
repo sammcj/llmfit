@@ -98,7 +98,7 @@ pub struct ModelFit {
     pub moe_offloaded_gb: Option<f64>, // GB of inactive experts offloaded to RAM
     pub score: f64,                    // weighted composite score 0-100
     pub score_components: ScoreComponents,
-    pub estimated_tps: f64,        // estimated tokens per second
+    pub estimated_tps: f64,        // baseline estimated tokens per second
     pub best_quant: String,        // best quantization for this hardware
     pub use_case: UseCase,         // inferred use case category
     pub runtime: InferenceRuntime, // inference runtime (MLX or llama.cpp)
@@ -302,7 +302,10 @@ impl ModelFit {
         let score = weighted_score(score_components, use_case);
 
         if estimated_tps > 0.0 {
-            notes.push(format!("Estimated speed: {:.1} tok/s", estimated_tps));
+            notes.push(format!(
+                "Baseline estimated speed: {:.1} tok/s",
+                estimated_tps
+            ));
         }
 
         ModelFit {
@@ -682,7 +685,14 @@ fn estimate_tps(
 ) -> f64 {
     use crate::hardware::gpu_memory_bandwidth_gbps;
 
-    let params = model.params_b().max(0.1);
+    // MoE models execute only active experts per token, so speed estimates should
+    // use active parameters when known; fit/memory paths still use full model size.
+    let params = model
+        .active_parameters
+        .filter(|_| model.is_moe)
+        .map(|p| (p as f64) / 1_000_000_000.0)
+        .unwrap_or_else(|| model.params_b())
+        .max(0.1);
 
     // ── Bandwidth-based estimation (preferred) ─────────────────────
     //
@@ -1478,6 +1488,60 @@ mod tests {
         // All should be positive
         assert!(tps_gpu > 0.0);
         assert!(tps_cpu > 0.0);
+    }
+
+    #[test]
+    fn test_estimate_tps_moe_uses_active_parameters() {
+        let dense_model = test_model("30B", 18.0, Some(18.0));
+        let mut moe_model = dense_model.clone();
+        moe_model.is_moe = true;
+        moe_model.active_parameters = Some(3_000_000_000);
+
+        let system = test_system(64.0, true, Some(24.0));
+
+        let tps_dense = estimate_tps(
+            &dense_model,
+            "Q4_K_M",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+        let tps_moe = estimate_tps(
+            &moe_model,
+            "Q4_K_M",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+
+        assert!(tps_moe > tps_dense * 5.0);
+    }
+
+    #[test]
+    fn test_estimate_tps_moe_without_active_parameters_falls_back_to_total() {
+        let dense_model = test_model("30B", 18.0, Some(18.0));
+        let mut moe_without_active = dense_model.clone();
+        moe_without_active.is_moe = true;
+        moe_without_active.active_parameters = None;
+
+        let system = test_system(64.0, true, Some(24.0));
+
+        let tps_dense = estimate_tps(
+            &dense_model,
+            "Q4_K_M",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+        let tps_moe = estimate_tps(
+            &moe_without_active,
+            "Q4_K_M",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+        );
+
+        assert_eq!(tps_dense, tps_moe);
     }
 
     // ────────────────────────────────────────────────────────────────────
