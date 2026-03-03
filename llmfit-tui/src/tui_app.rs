@@ -218,10 +218,6 @@ pub struct App {
 }
 
 impl App {
-    pub fn with_specs(specs: SystemSpecs) -> Self {
-        Self::with_specs_and_context(specs, None)
-    }
-
     pub fn with_specs_and_context(specs: SystemSpecs, context_limit: Option<u32>) -> Self {
         let db = ModelDatabase::new();
 
