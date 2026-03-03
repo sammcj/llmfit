@@ -170,7 +170,44 @@ llmfit recommend --json --use-case coding --limit 3
 llmfit plan "Qwen/Qwen3-4B-MLX-4bit" --context 8192
 llmfit plan "Qwen/Qwen3-4B-MLX-4bit" --context 8192 --quant mlx-4bit
 llmfit plan "Qwen/Qwen3-4B-MLX-4bit" --context 8192 --target-tps 25 --json
+
+# Run as a node-level REST API (for cluster schedulers / aggregators)
+llmfit serve --host 0.0.0.0 --port 8787
 ```
+
+### REST API (`llmfit serve`)
+
+`llmfit serve` starts an HTTP API that exposes the same fit/scoring data used by TUI/CLI, including filtering and top-model selection for a node.
+
+```sh
+# Liveness
+curl http://localhost:8787/health
+
+# Node hardware info
+curl http://localhost:8787/api/v1/system
+
+# Full fit list with filters
+curl "http://localhost:8787/api/v1/models?min_fit=marginal&runtime=llamacpp&sort=score&limit=20"
+
+# Key scheduling endpoint: top runnable models for this node
+curl "http://localhost:8787/api/v1/models/top?limit=5&min_fit=good&use_case=coding"
+
+# Search by model name/provider text
+curl "http://localhost:8787/api/v1/models/Mistral?runtime=any"
+```
+
+Supported query params for `models`/`models/top`:
+
+- `limit` (or `n`): max number of rows returned
+- `perfect`: `true|false` (forces perfect-only when `true`)
+- `min_fit`: `perfect|good|marginal|too_tight`
+- `runtime`: `any|mlx|llamacpp`
+- `use_case`: `general|coding|reasoning|chat|multimodal|embedding`
+- `provider`: provider text filter (substring)
+- `search`: free-text filter across name/provider/size/use-case
+- `sort`: `score|tps|params|mem|ctx|date|use_case`
+- `include_too_tight`: include non-runnable rows (default `false` on `/top`, `true` on `/models`)
+- `max_context`: per-request context cap for memory estimation
 
 ### GPU memory override
 

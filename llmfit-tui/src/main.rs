@@ -1,4 +1,5 @@
 mod display;
+mod serve_api;
 mod theme;
 mod tui_app;
 mod tui_events;
@@ -214,6 +215,17 @@ enum Commands {
         /// Context size in tokens
         #[arg(long, short = 'c', default_value = "4096")]
         ctx_size: u32,
+    },
+
+    /// Start llmfit REST API server for cluster/node scheduling workflows
+    Serve {
+        /// Host interface to bind
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(long, default_value = "8787")]
+        port: u16,
     },
 }
 
@@ -925,6 +937,13 @@ fn main() {
                 ctx_size,
             } => {
                 run_model(&model, server, port, ngl, ctx_size);
+            }
+
+            Commands::Serve { host, port } => {
+                if let Err(err) = serve_api::run_serve(&host, port, &cli.memory, context_limit) {
+                    eprintln!("Error: {}", err);
+                    std::process::exit(1);
+                }
             }
         }
         return;
