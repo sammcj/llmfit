@@ -763,6 +763,13 @@ fn validate_gguf_filename(filename: &str) -> Result<(), String> {
         return Err("GGUF filename must not be empty".to_string());
     }
 
+    if filename.contains('/') || filename.contains('\\') {
+        return Err(format!(
+            "Security: path separators not allowed in GGUF filename: {}",
+            filename
+        ));
+    }
+
     let path = std::path::Path::new(filename);
 
     if path.is_absolute() {
@@ -772,28 +779,6 @@ fn validate_gguf_filename(filename: &str) -> Result<(), String> {
         ));
     }
 
-    let mut normal_components = 0usize;
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                return Err(format!(
-                    "Security: path traversal not allowed in GGUF filename: {}",
-                    filename
-                ));
-            }
-            std::path::Component::Normal(_) => {
-                normal_components += 1;
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                return Err(format!(
-                    "Security: invalid path component in GGUF filename: {}",
-                    filename
-                ));
-            }
-        }
-    }
-
     if !filename.ends_with(".gguf") {
         return Err(format!(
             "GGUF filename must end in .gguf, got: {}",
@@ -801,16 +786,9 @@ fn validate_gguf_filename(filename: &str) -> Result<(), String> {
         ));
     }
 
-    if normal_components != 1 {
+    if path.file_name().and_then(|n| n.to_str()) != Some(filename) {
         return Err(format!(
-            "Security: subdirectories not allowed in GGUF filename: {}",
-            filename
-        ));
-    }
-
-    if filename.contains('\\') {
-        return Err(format!(
-            "Security: path separators not allowed in GGUF filename: {}",
+            "Security: GGUF filename must be a basename without path components: {}",
             filename
         ));
     }
@@ -1596,7 +1574,6 @@ mod tests {
     fn test_validate_gguf_filename_valid() {
         assert!(validate_gguf_filename("Llama-3.1-8B-Q4_K_M.gguf").is_ok());
         assert!(validate_gguf_filename("model.gguf").is_ok());
-        assert!(validate_gguf_filename("./model.gguf").is_ok());
     }
 
     #[test]
@@ -1630,11 +1607,21 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_gguf_filename_rejects_non_basename_forms() {
+        assert!(validate_gguf_filename("./model.gguf").is_err());
+        assert!(validate_gguf_filename("model.gguf/").is_err());
+        assert!(validate_gguf_filename(".\\model.gguf").is_err());
+        assert!(validate_gguf_filename("C:/models/model.gguf").is_err());
+        assert!(validate_gguf_filename("C:\\models\\model.gguf").is_err());
+    }
+
+    #[test]
     fn test_parse_repo_gguf_entries_filters_unsafe_paths() {
         let entries = vec![
             serde_json::json!({"path": "good.gguf", "size": 123u64}),
             serde_json::json!({"path": "../escape.gguf", "size": 456u64}),
             serde_json::json!({"path": "nested/model.gguf", "size": 789u64}),
+            serde_json::json!({"path": "./model.gguf", "size": 99u64}),
             serde_json::json!({"path": "readme.md", "size": 12u64}),
         ];
 
