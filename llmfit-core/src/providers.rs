@@ -329,6 +329,16 @@ fn check_mlx_python() -> bool {
     })
 }
 
+fn is_likely_mlx_repo(owner: &str, repo: &str) -> bool {
+    let owner_lower = owner.to_lowercase();
+    let repo_lower = repo.to_lowercase();
+    owner_lower == "mlx-community"
+        || repo_lower.contains("-mlx-")
+        || repo_lower.ends_with("-mlx")
+        || repo_lower.contains("mlx-")
+        || repo_lower.ends_with("mlx")
+}
+
 /// Scan ~/.cache/huggingface/hub/ for MLX model directories.
 fn scan_hf_cache_for_mlx() -> HashSet<String> {
     let mut set = HashSet::new();
@@ -339,12 +349,25 @@ fn scan_hf_cache_for_mlx() -> HashSet<String> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if let Some(rest) = name_str.strip_prefix("models--mlx-community--") {
-            // Directory name: models--mlx-community--Llama-3.1-8B-Instruct-4bit
-            // Normalize to lowercase
-            let model_name = rest.replace("--", "/").to_lowercase();
-            set.insert(model_name);
+        let Some(rest) = name_str.strip_prefix("models--") else {
+            continue;
+        };
+        let mut parts = rest.splitn(2, "--");
+        let Some(owner) = parts.next() else {
+            continue;
+        };
+        let Some(repo) = parts.next() else {
+            continue;
+        };
+
+        if !is_likely_mlx_repo(owner, repo) {
+            continue;
         }
+
+        let owner_lower = owner.to_lowercase();
+        let repo_lower = repo.to_lowercase();
+        set.insert(format!("{}/{}", owner_lower, repo_lower));
+        set.insert(repo_lower);
     }
     set
 }
@@ -411,7 +434,12 @@ impl ModelProvider for MlxProvider {
     }
 
     fn start_pull(&self, model_tag: &str) -> Result<PullHandle, String> {
-        let tag = model_tag.to_string();
+        let repo_id = if model_tag.contains('/') {
+            model_tag.to_string()
+        } else {
+            format!("mlx-community/{}", model_tag)
+        };
+        let repo_for_thread = repo_id.clone();
         let (tx, rx) = std::sync::mpsc::channel();
 
         // Resolve the hf binary path before spawning the thread so we can
@@ -423,13 +451,13 @@ impl ModelProvider for MlxProvider {
 
         std::thread::spawn(move || {
             let _ = tx.send(PullEvent::Progress {
-                status: format!("Downloading mlx-community/{}...", tag),
+                status: format!("Downloading {}...", repo_for_thread),
                 percent: None,
             });
 
             // Download from Hugging Face using their CLI tool
             let result = std::process::Command::new(&hf_bin)
-                .args(["download", &format!("mlx-community/{}", tag)])
+                .args(["download", &repo_for_thread])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .output();
@@ -453,7 +481,7 @@ impl ModelProvider for MlxProvider {
         });
 
         Ok(PullHandle {
-            model_tag: model_tag.to_string(),
+            model_tag: repo_id,
             receiver: rx,
         })
     }
@@ -1197,10 +1225,79 @@ pub fn first_existing_gguf_repo(hf_name: &str) -> Option<String> {
 // MLX name-matching helpers
 // ---------------------------------------------------------------------------
 
+fn push_unique_candidate(candidates: &mut Vec<String>, candidate: String) {
+    if !candidate.is_empty() && !candidates.iter().any(|c| c == &candidate) {
+        candidates.push(candidate);
+    }
+}
+
+fn strip_trailing_quant_suffix(name: &str) -> String {
+    for suffix in ["-4bit", "-6bit", "-8bit"] {
+        if let Some(stripped) = name.strip_suffix(suffix) {
+            return stripped.to_string();
+        }
+    }
+    name.to_string()
+}
+
+fn normalize_mlx_repo_base(repo_lower: &str) -> String {
+    let without_quant = strip_trailing_quant_suffix(repo_lower);
+    let without_mlx = without_quant
+        .strip_suffix("-mlx")
+        .unwrap_or(&without_quant)
+        .trim_matches('-')
+        .to_string();
+    without_mlx
+}
+
+fn strip_trailing_common_model_suffixes(name: &str) -> String {
+    let mut out = name.to_string();
+    loop {
+        let mut changed = false;
+        for suffix in ["-instruct", "-chat", "-hf", "-it"] {
+            if let Some(stripped) = out.strip_suffix(suffix) {
+                out = stripped.trim_end_matches('-').to_string();
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+fn explicit_mlx_repo_id(hf_name: &str) -> Option<String> {
+    if hf_name.matches('/').count() != 1 {
+        return None;
+    }
+    let mut parts = hf_name.splitn(2, '/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || !is_likely_mlx_repo(owner, repo) {
+        return None;
+    }
+    Some(format!("{}/{}", owner.to_lowercase(), repo.to_lowercase()))
+}
+
 /// Map a HuggingFace model name to mlx-community repo name candidates.
 /// Pattern: mlx-community/{RepoName}-{quant}bit
 pub fn hf_name_to_mlx_candidates(hf_name: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    if let Some(repo_id) = explicit_mlx_repo_id(hf_name) {
+        push_unique_candidate(&mut candidates, repo_id.clone());
+        if let Some(repo_name) = repo_id.split('/').next_back() {
+            push_unique_candidate(&mut candidates, repo_name.to_string());
+        }
+    }
+
     let repo = hf_name.split('/').next_back().unwrap_or(hf_name);
+    let repo_lower = repo.to_lowercase();
+    push_unique_candidate(&mut candidates, repo_lower.clone());
+
+    let normalized_repo = normalize_mlx_repo_base(&repo_lower);
 
     // Explicit mappings: HF repo suffix → mlx-community repo name (without quant suffix)
     let mappings: &[(&str, &str)] = &[
@@ -1246,31 +1343,32 @@ pub fn hf_name_to_mlx_candidates(hf_name: &str) -> Vec<String> {
         ("Phi-3-mini-4k-instruct", "Phi-3-mini-4k-instruct"),
     ];
 
-    let repo_lower = repo.to_lowercase();
     for &(hf_suffix, mlx_base) in mappings {
-        if repo_lower == hf_suffix.to_lowercase() {
+        let mapped_suffix = hf_suffix.to_lowercase();
+        if repo_lower == mapped_suffix || normalized_repo == mapped_suffix {
             let base_lower = mlx_base.to_lowercase();
-            return vec![
-                format!("{}-8bit", base_lower),
-                format!("{}-4bit", base_lower),
-                base_lower,
-            ];
+            push_unique_candidate(&mut candidates, format!("{}-4bit", base_lower));
+            push_unique_candidate(&mut candidates, format!("{}-8bit", base_lower));
+            push_unique_candidate(&mut candidates, base_lower);
+            return candidates;
         }
     }
 
-    // Fallback heuristic: strip common suffixes and generate candidates
-    let stripped = repo_lower
-        .replace("-instruct", "")
-        .replace("-chat", "")
-        .replace("-hf", "")
-        .replace("-it", "");
-    vec![
-        format!("{}-8bit", repo_lower),
-        format!("{}-4bit", repo_lower),
-        format!("{}-8bit", stripped),
-        format!("{}-4bit", stripped),
-        repo_lower,
-    ]
+    // Fallback heuristic: normalize explicit MLX names and try common variants.
+    if !normalized_repo.is_empty() {
+        push_unique_candidate(&mut candidates, format!("{}-4bit", normalized_repo));
+        push_unique_candidate(&mut candidates, format!("{}-8bit", normalized_repo));
+        push_unique_candidate(&mut candidates, normalized_repo.clone());
+    }
+
+    let stripped = strip_trailing_common_model_suffixes(&normalized_repo);
+    if !stripped.is_empty() && stripped != normalized_repo {
+        push_unique_candidate(&mut candidates, format!("{}-4bit", stripped));
+        push_unique_candidate(&mut candidates, format!("{}-8bit", stripped));
+        push_unique_candidate(&mut candidates, stripped);
+    }
+
+    candidates
 }
 
 /// Check if any MLX candidates for an HF model appear in the installed set.
@@ -1281,6 +1379,9 @@ pub fn is_model_installed_mlx(hf_name: &str, installed: &HashSet<String>) -> boo
 
 /// Given an HF model name, return the best MLX tag to use for pulling.
 pub fn mlx_pull_tag(hf_name: &str) -> String {
+    if let Some(repo_id) = explicit_mlx_repo_id(hf_name) {
+        return repo_id;
+    }
     let candidates = hf_name_to_mlx_candidates(hf_name);
     // Prefer 4bit (smaller download) for pulling
     candidates
@@ -1494,6 +1595,30 @@ mod tests {
     }
 
     #[test]
+    fn test_hf_name_to_mlx_candidates_normalizes_explicit_mlx_repo() {
+        let candidates =
+            hf_name_to_mlx_candidates("lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit");
+
+        assert!(
+            candidates
+                .contains(&"lmstudio-community/qwen3-coder-30b-a3b-instruct-mlx-8bit".to_string())
+        );
+        assert!(candidates.contains(&"qwen3-coder-30b-a3b-instruct-4bit".to_string()));
+        assert!(candidates.contains(&"qwen3-coder-30b-a3b-instruct-8bit".to_string()));
+        assert!(!candidates.iter().any(|c| c.contains("-8bit-4bit")));
+        assert!(!candidates.iter().any(|c| c.contains("-8bit-8bit")));
+    }
+
+    #[test]
+    fn test_mlx_pull_tag_prefers_explicit_repo_id() {
+        let tag = mlx_pull_tag("lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit");
+        assert_eq!(
+            tag,
+            "lmstudio-community/qwen3-coder-30b-a3b-instruct-mlx-8bit"
+        );
+    }
+
+    #[test]
     fn test_mlx_cache_scan_parsing() {
         // Test that the candidate matching works with cache-style names
         let mut installed = HashSet::new();
@@ -1521,6 +1646,17 @@ mod tests {
         ));
         assert!(!is_model_installed_mlx(
             "Qwen/Qwen2.5-14B-Instruct",
+            &installed
+        ));
+    }
+
+    #[test]
+    fn test_is_model_installed_mlx_with_owner_prefixed_repo_id() {
+        let mut installed = HashSet::new();
+        installed.insert("lmstudio-community/qwen3-coder-30b-a3b-instruct-mlx-8bit".to_string());
+
+        assert!(is_model_installed_mlx(
+            "lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-8bit",
             &installed
         ));
     }

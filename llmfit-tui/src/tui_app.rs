@@ -922,7 +922,12 @@ impl App {
         match self.mlx.start_pull(&tag) {
             Ok(handle) => {
                 self.pull_model_name = Some(model_name);
-                self.pull_status = Some(format!("Pulling mlx-community/{}...", tag));
+                let repo_display = if tag.contains('/') {
+                    tag
+                } else {
+                    format!("mlx-community/{}", tag)
+                };
+                self.pull_status = Some(format!("Pulling {}...", repo_display));
                 self.pull_percent = None;
                 self.pull_provider = Some(ActivePullProvider::Mlx);
                 self.pull_active = Some(handle);
