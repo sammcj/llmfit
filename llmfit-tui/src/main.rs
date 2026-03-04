@@ -1017,7 +1017,15 @@ fn main() {
 
             Commands::List => {
                 let db = ModelDatabase::new();
-                display::display_all_models(db.get_all_models());
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(db.get_all_models())
+                            .expect("JSON serialization failed")
+                    );
+                } else {
+                    display::display_all_models(db.get_all_models());
+                }
             }
 
             Commands::Fit {

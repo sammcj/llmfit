@@ -89,7 +89,7 @@ pub struct ScoreComponents {
     pub context: f64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct ModelFit {
     pub model: LlmModel,
     pub fit_level: FitLevel,
