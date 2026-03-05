@@ -600,6 +600,7 @@ impl SystemSpecs {
 
         let mut slot_hints: Vec<String> = Vec::new();
         let entries = std::fs::read_dir("/sys/class/drm").ok()?;
+
         for entry in entries.flatten() {
             let card_path = entry.path();
             let fname = card_path.file_name()?.to_str()?.to_string();
@@ -637,7 +638,6 @@ impl SystemSpecs {
             }
 
             // Try to get GPU name from lspci
-            let gpu_name = Self::get_amd_gpu_name_lspci();
             let gpu_name = Self::get_amd_gpu_name_lspci(&slot_hints);
             let name = gpu_name.unwrap_or_else(|| "AMD GPU".to_string());
 
@@ -728,7 +728,7 @@ impl SystemSpecs {
     /// Read lspci output, with host fallback for containerized environments.
     fn lspci_output() -> Option<String> {
         let local = std::process::Command::new("lspci")
-            .arg("-nn")
+            .arg("-nnD")
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -739,7 +739,7 @@ impl SystemSpecs {
         }
 
         std::process::Command::new("flatpak-spawn")
-            .args(["--host", "lspci", "-nn"])
+            .args(["--host", "lspci", "-nnD"])
             .output()
             .ok()
             .filter(|o| o.status.success())
