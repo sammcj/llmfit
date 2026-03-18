@@ -1872,6 +1872,108 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> Option<f64> {
     None
 }
 
+/// Returns the NVIDIA compute capability (major, minor) for a known GPU name.
+/// Used to determine compatibility with quantization formats that require
+/// specific hardware features (e.g. AWQ requires Turing+ / cc >= 7.5).
+///
+/// Returns `None` for non-NVIDIA GPUs or unrecognized models.
+pub fn gpu_compute_capability(name: &str) -> Option<(u8, u8)> {
+    let lower = name.to_lowercase();
+
+    // ── Blackwell (RTX 50xx, B100/B200) ──────────────────────────
+    if lower.contains("5090")
+        || lower.contains("5080")
+        || lower.contains("5070")
+        || lower.contains("5060")
+        || lower.contains("b200")
+        || lower.contains("b100")
+        || lower.contains("gb200")
+        || lower.contains("gb100")
+    {
+        return Some((10, 0));
+    }
+
+    // ── Hopper (H100, H200) ─────────────────────────────────────
+    if lower.contains("h100") || lower.contains("h200") {
+        return Some((9, 0));
+    }
+
+    // ── Ada Lovelace (RTX 40xx, L4, L40/L40S) ──────────────────
+    if lower.contains("4090")
+        || lower.contains("4080")
+        || lower.contains("4070")
+        || lower.contains("4060")
+        || lower.contains("l40")
+        || lower.contains("l4")
+    {
+        return Some((8, 9));
+    }
+
+    // ── Ampere (RTX 30xx consumer = 8.6, A100/A10/A6000 = 8.0) ─
+    if lower.contains("a100") {
+        return Some((8, 0));
+    }
+    if lower.contains("3090")
+        || lower.contains("3080")
+        || lower.contains("3070")
+        || lower.contains("3060")
+        || lower.contains("a10")
+        || lower.contains("a6000")
+        || lower.contains("a5000")
+        || lower.contains("a4000")
+        || lower.contains("a2000")
+        || lower.contains("a16")
+    {
+        return Some((8, 6));
+    }
+
+    // ── Turing (RTX 20xx, GTX 16xx, T4) ─────────────────────────
+    if lower.contains("2080")
+        || lower.contains("2070")
+        || lower.contains("2060")
+        || lower.contains("1660")
+        || lower.contains("1650")
+        || lower.contains("t4")
+    {
+        return Some((7, 5));
+    }
+
+    // ── Volta (V100, Titan V) ───────────────────────────────────
+    if lower.contains("v100") || lower.contains("titan v") {
+        return Some((7, 0));
+    }
+
+    // ── Pascal (P100, GTX 10xx, Titan X Pascal) ─────────────────
+    if lower.contains("p100")
+        || lower.contains("1080")
+        || lower.contains("1070")
+        || lower.contains("1060")
+        || lower.contains("1050")
+        || lower.contains("p40")
+        || lower.contains("p4")
+    {
+        return Some((6, 1));
+    }
+
+    None
+}
+
+/// Minimum NVIDIA compute capability required by a quantization format
+/// when running under vLLM. Based on vLLM's documented hardware support:
+/// <https://docs.vllm.ai/en/latest/features/quantization/#supported-hardware>
+///
+/// Returns `None` for quantization formats that have no known CC restriction
+/// (e.g. GGUF quants which run through llama.cpp, not vLLM).
+pub fn quant_min_compute_capability(quantization: &str) -> Option<(u8, u8)> {
+    match quantization {
+        // AWQ requires Turing+ (int4 tensor-core kernels)
+        "AWQ-4bit" | "AWQ-8bit" => Some((7, 5)),
+        // GPTQ Marlin kernels require Turing+
+        "GPTQ-Int4" | "GPTQ-Int8" => Some((7, 5)),
+        _ => None,
+    }
+}
+
 /// Fallback VRAM estimation from GPU model name.
 /// Used when nvidia-smi or other tools report 0 VRAM.
 fn estimate_vram_from_name(name: &str) -> f64 {
@@ -2644,5 +2746,83 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             super::gpu_memory_bandwidth_gbps("AMD Radeon RX 9070"),
             Some(488.0)
         );
+    }
+
+    // ── compute capability tests ──────────────────────────────────────
+
+    #[test]
+    fn test_compute_capability_nvidia_generations() {
+        // Pascal
+        assert_eq!(super::gpu_compute_capability("Tesla P100"), Some((6, 1)));
+        // Volta
+        assert_eq!(
+            super::gpu_compute_capability("Tesla V100-PCIE-16GB"),
+            Some((7, 0))
+        );
+        // Turing
+        assert_eq!(super::gpu_compute_capability("Tesla T4"), Some((7, 5)));
+        assert_eq!(
+            super::gpu_compute_capability("NVIDIA GeForce RTX 2080 Ti"),
+            Some((7, 5))
+        );
+        assert_eq!(
+            super::gpu_compute_capability("NVIDIA GeForce GTX 1660 Ti"),
+            Some((7, 5))
+        );
+        // Ampere
+        assert_eq!(super::gpu_compute_capability("NVIDIA A100"), Some((8, 0)));
+        assert_eq!(
+            super::gpu_compute_capability("NVIDIA GeForce RTX 3090"),
+            Some((8, 6))
+        );
+        // Ada Lovelace
+        assert_eq!(
+            super::gpu_compute_capability("NVIDIA GeForce RTX 4090"),
+            Some((8, 9))
+        );
+        assert_eq!(super::gpu_compute_capability("NVIDIA L40S"), Some((8, 9)));
+        // Hopper
+        assert_eq!(
+            super::gpu_compute_capability("NVIDIA H100 SXM"),
+            Some((9, 0))
+        );
+        // Blackwell
+        assert_eq!(
+            super::gpu_compute_capability("NVIDIA GeForce RTX 5090"),
+            Some((10, 0))
+        );
+    }
+
+    #[test]
+    fn test_compute_capability_unknown_returns_none() {
+        assert_eq!(super::gpu_compute_capability("Some Random GPU"), None);
+        assert_eq!(super::gpu_compute_capability("Apple M4 Max"), None);
+        assert_eq!(
+            super::gpu_compute_capability("AMD Radeon RX 7900 XTX"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_quant_min_compute_capability() {
+        assert_eq!(
+            super::quant_min_compute_capability("AWQ-4bit"),
+            Some((7, 5))
+        );
+        assert_eq!(
+            super::quant_min_compute_capability("AWQ-8bit"),
+            Some((7, 5))
+        );
+        assert_eq!(
+            super::quant_min_compute_capability("GPTQ-Int4"),
+            Some((7, 5))
+        );
+        assert_eq!(
+            super::quant_min_compute_capability("GPTQ-Int8"),
+            Some((7, 5))
+        );
+        // GGUF quants have no CC restriction
+        assert_eq!(super::quant_min_compute_capability("Q4_K_M"), None);
+        assert_eq!(super::quant_min_compute_capability("Q8_0"), None);
     }
 }

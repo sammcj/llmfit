@@ -600,7 +600,24 @@ pub fn backend_compatible(model: &LlmModel, system: &SystemSpecs) -> bool {
     if model.is_mlx_model() {
         system.backend == GpuBackend::Metal && system.unified_memory
     } else if model.is_prequantized() {
-        matches!(system.backend, GpuBackend::Cuda | GpuBackend::Rocm)
+        if !matches!(system.backend, GpuBackend::Cuda | GpuBackend::Rocm) {
+            return false;
+        }
+        // For CUDA GPUs, check that the GPU's compute capability meets the
+        // minimum required by the quantization format (e.g. AWQ needs Turing+).
+        // ROCm and unrecognized NVIDIA GPUs are assumed compatible.
+        if system.backend == GpuBackend::Cuda {
+            if let Some(min_cc) =
+                crate::hardware::quant_min_compute_capability(&model.quantization)
+            {
+                if let Some(gpu_name) = &system.gpu_name {
+                    if let Some(gpu_cc) = crate::hardware::gpu_compute_capability(gpu_name) {
+                        return gpu_cc >= min_cc;
+                    }
+                }
+            }
+        }
+        true
     } else {
         true
     }
@@ -1805,7 +1822,7 @@ mod tests {
         let mut model = test_model("7B", 4.0, Some(4.0));
         model.format = models::ModelFormat::Awq;
 
-        // AWQ on CUDA → compatible
+        // AWQ on CUDA → compatible (default test GPU name is unrecognized, assumed ok)
         let cuda_sys = test_system(64.0, true, Some(24.0));
         assert!(backend_compatible(&model, &cuda_sys));
 
@@ -1828,5 +1845,82 @@ mod tests {
         let mut gguf_model = test_model("7B", 4.0, Some(4.0));
         gguf_model.format = models::ModelFormat::Gguf;
         assert!(backend_compatible(&gguf_model, &metal_sys));
+    }
+
+    #[test]
+    fn test_awq_incompatible_on_volta_v100() {
+        // V100 is Volta (cc 7.0) — AWQ requires cc >= 7.5
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.format = models::ModelFormat::Awq;
+        model.quantization = "AWQ-4bit".to_string();
+
+        let v100_sys = test_system_with_gpu(64.0, 16.0, "Tesla V100-PCIE-16GB");
+        assert!(!backend_compatible(&model, &v100_sys));
+    }
+
+    #[test]
+    fn test_gptq_incompatible_on_volta_v100() {
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.format = models::ModelFormat::Gptq;
+        model.quantization = "GPTQ-Int4".to_string();
+
+        let v100_sys = test_system_with_gpu(64.0, 16.0, "Tesla V100-PCIE-16GB");
+        assert!(!backend_compatible(&model, &v100_sys));
+    }
+
+    #[test]
+    fn test_awq_compatible_on_turing_and_newer() {
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.format = models::ModelFormat::Awq;
+        model.quantization = "AWQ-4bit".to_string();
+
+        // T4 is Turing (cc 7.5) — should work
+        let t4_sys = test_system_with_gpu(64.0, 16.0, "Tesla T4");
+        assert!(backend_compatible(&model, &t4_sys));
+
+        // RTX 3090 is Ampere (cc 8.6) — should work
+        let ampere_sys =
+            test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 3090");
+        assert!(backend_compatible(&model, &ampere_sys));
+
+        // RTX 4090 is Ada Lovelace (cc 8.9) — should work
+        let ada_sys =
+            test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 4090");
+        assert!(backend_compatible(&model, &ada_sys));
+
+        // H100 is Hopper (cc 9.0) — should work
+        let hopper_sys = test_system_with_gpu(64.0, 80.0, "NVIDIA H100 SXM");
+        assert!(backend_compatible(&model, &hopper_sys));
+    }
+
+    #[test]
+    fn test_awq_on_rocm_always_compatible() {
+        // ROCm GPUs don't have NVIDIA compute capability — assume compatible
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.format = models::ModelFormat::Awq;
+        model.quantization = "AWQ-4bit".to_string();
+
+        let mut rocm_sys = test_system_with_gpu(64.0, 24.0, "AMD Instinct MI300X");
+        rocm_sys.backend = GpuBackend::Rocm;
+        assert!(backend_compatible(&model, &rocm_sys));
+    }
+
+    #[test]
+    fn test_awq_on_pascal_incompatible() {
+        // P100 is Pascal (cc 6.1) — AWQ requires cc >= 7.5
+        let mut model = test_model("7B", 4.0, Some(4.0));
+        model.format = models::ModelFormat::Awq;
+        model.quantization = "AWQ-4bit".to_string();
+
+        let p100_sys = test_system_with_gpu(64.0, 16.0, "Tesla P100");
+        assert!(!backend_compatible(&model, &p100_sys));
+    }
+
+    #[test]
+    fn test_gguf_on_volta_still_compatible() {
+        // GGUF models should remain compatible on any GPU — no CC restriction
+        let model = test_model("7B", 4.0, Some(4.0));
+        let v100_sys = test_system_with_gpu(64.0, 16.0, "Tesla V100-PCIE-16GB");
+        assert!(backend_compatible(&model, &v100_sys));
     }
 }
