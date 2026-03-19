@@ -1357,8 +1357,10 @@ impl App {
             || self.docker_mr_available
             || self.lmstudio_available;
         if !any_available {
-            self.pull_status =
-                Some("No provider available (Ollama/MLX/llama.cpp/Docker/LM Studio)".to_string());
+            self.pull_status = Some(
+                "No runtime available — install Ollama, llama.cpp, Docker, or LM Studio"
+                    .to_string(),
+            );
             return;
         }
         if self.pull_active.is_some() {
@@ -1372,6 +1374,8 @@ impl App {
             return;
         }
         let model_name = fit.model.name.clone();
+        let model_format = fit.model.format;
+        let is_mlx_model = fit.model.is_mlx_model();
         let has_catalog_gguf = !fit.model.gguf_sources.is_empty();
 
         let download_options = self.available_download_providers(&model_name, has_catalog_gguf);
@@ -1385,11 +1389,35 @@ impl App {
                 || self.docker_mr_available
                 || self.lmstudio_available;
             self.pull_status = Some(if any_runtime {
-                "No downloadable format found for this model".to_string()
+                Self::format_no_download_message(model_format, is_mlx_model)
             } else {
-                "No compatible runtime available — install Ollama, llama.cpp, Docker, or LM Studio"
+                "No runtime available — install Ollama, llama.cpp, Docker, or LM Studio"
                     .to_string()
             });
+        }
+    }
+
+    /// Build a user-friendly message explaining why no download is available,
+    /// based on the model's weight format.
+    fn format_no_download_message(
+        format: llmfit_core::models::ModelFormat,
+        is_mlx_model: bool,
+    ) -> String {
+        use llmfit_core::models::ModelFormat;
+        if is_mlx_model {
+            "MLX model — requires Apple Silicon with MLX installed".to_string()
+        } else {
+            match format {
+                ModelFormat::Awq => {
+                    "AWQ model — requires vLLM or a CUDA/ROCm GPU; no GGUF conversion available"
+                        .to_string()
+                }
+                ModelFormat::Gptq => {
+                    "GPTQ model — requires vLLM or a CUDA/ROCm GPU; no GGUF conversion available"
+                        .to_string()
+                }
+                _ => "No downloadable format found for this model".to_string(),
+            }
         }
     }
 
