@@ -76,12 +76,6 @@ pub struct HardwareInfo {
 pub struct LeaderboardEntry {
     pub id: String,
     #[serde(default)]
-    pub hf_id: String,
-    #[serde(default)]
-    pub engine_name: String,
-    #[serde(default)]
-    pub quantization: String,
-    #[serde(default)]
     pub tok_s_out: Option<f64>,
     #[serde(default)]
     pub tok_s_total: Option<f64>,
@@ -94,15 +88,88 @@ pub struct LeaderboardEntry {
     #[serde(default)]
     pub peak_vram_gb: Option<f64>,
     #[serde(default)]
-    pub hardware_name: Option<String>,
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub model: Option<LeaderboardModel>,
+    #[serde(default)]
+    pub hardware: Option<HardwareInfo>,
+    #[serde(default)]
+    pub engine: Option<LeaderboardEngine>,
+    #[serde(default)]
+    pub user: Option<LeaderboardUser>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardModel {
+    #[serde(default)]
+    pub hf_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub params: Option<f64>,
+    #[serde(default)]
+    pub is_mo_e: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardEngine {
+    #[serde(default)]
+    pub engine_name: String,
+    #[serde(default)]
+    pub engine_version: Option<String>,
+    #[serde(default)]
+    pub quantization: String,
+    #[serde(default)]
+    pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LeaderboardUser {
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub verified: Option<bool>,
-    #[serde(default)]
-    pub param_size: Option<String>,
-    #[serde(default)]
-    pub model_family: Option<String>,
+}
+
+impl LeaderboardEntry {
+    /// Helper to get the model HF ID.
+    pub fn hf_id(&self) -> &str {
+        self.model.as_ref().map(|m| m.hf_id.as_str()).unwrap_or("")
+    }
+
+    /// Helper to get the engine name.
+    pub fn engine_name(&self) -> &str {
+        self.engine
+            .as_ref()
+            .map(|e| e.engine_name.as_str())
+            .unwrap_or("")
+    }
+
+    /// Helper to get the quantization.
+    pub fn quantization(&self) -> &str {
+        self.engine
+            .as_ref()
+            .map(|e| e.quantization.as_str())
+            .unwrap_or("")
+    }
+
+    /// Helper to get the username.
+    pub fn username(&self) -> &str {
+        self.user
+            .as_ref()
+            .and_then(|u| u.username.as_deref())
+            .unwrap_or("anon")
+    }
+
+    /// Helper to check verified status.
+    pub fn verified(&self) -> bool {
+        self.user.as_ref().and_then(|u| u.verified).unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

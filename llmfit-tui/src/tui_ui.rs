@@ -3923,7 +3923,7 @@ fn draw_benchmarks(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColor
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(tc.accent))
-        .title(" Benchmarks — localmaxxing.com ")
+        .title(" Benchmarks ")
         .title_style(Style::default().fg(tc.accent).add_modifier(Modifier::BOLD));
 
     let inner = block.inner(area);
@@ -4061,29 +4061,22 @@ fn draw_benchmarks(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColor
                 .map(|v| format!("{}", v))
                 .unwrap_or_default();
 
-            let verified_marker = if entry.verified.unwrap_or(false) {
-                " *"
-            } else {
-                ""
-            };
-            let user = format!(
-                "{}{}",
-                entry.username.as_deref().unwrap_or("anon"),
-                verified_marker
-            );
+            let verified_marker = if entry.verified() { " *" } else { "" };
+            let user = format!("{}{}", entry.username(), verified_marker);
 
             // Truncate model name to fit
+            let hf_id = entry.hf_id();
             let max_name = 36;
-            let name = if entry.hf_id.len() > max_name {
-                format!("{}…", &entry.hf_id[..max_name - 1])
+            let name = if hf_id.len() > max_name {
+                format!("{}…", &hf_id[..max_name - 1])
             } else {
-                entry.hf_id.clone()
+                hf_id.to_string()
             };
 
             Row::new(vec![
                 Cell::from(format!(" {}", name)),
-                Cell::from(entry.engine_name.as_str()),
-                Cell::from(entry.quantization.as_str()),
+                Cell::from(entry.engine_name()),
+                Cell::from(entry.quantization()),
                 Cell::from(tok_out).style(Style::default().fg(tc.good)),
                 Cell::from(tok_total),
                 Cell::from(ttft),
